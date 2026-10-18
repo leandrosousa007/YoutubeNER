@@ -1,0 +1,21 @@
+.layout { min-height: 100dvh; }
+.header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  min-height: 76px;
+  padding: 1rem max(1.5rem, calc((100% - 1000px) / 2));
+  border-top: 3px solid #f00;
+  border-bottom: 1px solid #e5e5e5;
+  background: #fff;
+}
+.brand { display: flex; align-items: center; }
+.logo { display: block; width: 42px; height: 42px; }
+.name { color: #171717; font-weight: 700; font-size: 1.35rem; letter-spacing: -0.04em; text-decoration: none; }
+.main { width: min(100% - 3rem, 1000px); margin: 0 auto; padding: 3rem 0; }
+.skipLink { position: absolute; top: 0.5rem; left: 0.5rem; transform: translateY(-200%); padding: 0.75rem; background: #fff; z-index: 1; }
+.skipLink:focus { transform: translateY(0); }
+@media (max-width: 600px) {
+  .header { padding: 0.75rem 1rem; min-height: 68px; }
+  .main { width: calc(100% - 2rem); padding: 2rem 0; }
+}

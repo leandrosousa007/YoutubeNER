@@ -1,0 +1,19 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 46px;
+  padding: 0.7rem 1.15rem;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 0.875rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.primary { background: #d00; color: #fff; }
+.primary:hover { background: #b00; }
+.secondary { border-color: #d4d4d4; background: #fff; color: #333; }
+.secondary:hover { border-color: #c00; background: #fff5f5; color: #c00; }
+.button:disabled { opacity: 0.45; cursor: not-allowed; }

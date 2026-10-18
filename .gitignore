@@ -1,0 +1,10 @@
+.env
+/manual/
+__pycache__/
+*.pyc
+.venv/
+node_modules/
+dist/
+DOCUMENTACAO_API.md
+DOCUMENTACAO_FRONTEND.md
+videos_selecionados.txt
