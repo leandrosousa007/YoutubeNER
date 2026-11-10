@@ -1,97 +1,55 @@
 # YouTubeNER
 
-Aplicação para coletar comentários de vídeos do YouTube, visualizar os dados e exportá-los em CSV.
+Ferramenta local de coleta e anotação de comentários do YouTube para pesquisa em Processamento de Linguagem Natural. O corpus é usado na anotação de entidades nomeadas e poderá servir para treinar modelos de NER.
 
-O projeto faz parte da minha **Iniciação Científica na área de Inteligência Artificial e Processamento de Linguagem Natural (PLN)**, com foco em **Reconhecimento de Entidades Nomeadas (NER)**.
+## Coletar e anotar
 
-## 🔎 Sobre a pesquisa
+1. Em **Coleções**, informe o ID do vídeo. **Adicionar ao PostgreSQL** grava os comentários principais em `dataset.comentario`; **Baixar CSV do vídeo** gera um arquivo sem gravar no banco. As respostas a comentários não são coletadas.
+2. Clique em **Anotar comentários do banco**. Selecione um trecho no painel central e clique em um dos 18 tipos à direita. A marcação é salva na hora. Clique em uma marcação existente para mudar o tipo ou excluí-la.
+3. À esquerda, abra um grupo para ver os trechos marcados em toda a coleção. Clique em um trecho para localizar seu comentário, ou no **×** para excluir a marcação. O botão exclui a anotação, sem apagar o comentário. Relações que usam aquele trecho são removidas junto com a marcação.
+4. Após marcar dois trechos, use **Nova relação** para ligá-los. Use **Concluir revisão** também nos comentários sem entidades e **Próximo pendente** para continuar de onde parou.
 
-O objetivo é construir um conjunto de dados de comentários do YouTube para, nas próximas etapas, anotar as entidades presentes nos textos e treinar modelos de NER.
+A aba **Entidades** permite criar tipos com nome, código, cor e descrição. **Excluir** retira o tipo da lista de marcação e preserva as marcações existentes. Para reativá-lo, abra **Removidos → Restaurar**. O botão **×** nos grupos da bancada exclui só uma marcação específica.
 
-Esses modelos serão utilizados para reconhecer entidades como pessoas, organizações e locais.
+No celular, ao selecionar texto, os tipos aparecem na barra inferior. Deslize a lista para encontrar o tipo e toque nele para marcar. Use **Marcações** e **Detalhes do trecho** para abrir os painéis.
 
-**Etapa atual:** desenvolvimento da ferramenta de coleta e preparação dos dados. A anotação das entidades e o treinamento dos modelos ainda serão realizados.
+O painel central exibe o ID original e permite saltar para qualquer comentário pelo ID. Os tokens de cor, tipografia, espaço e movimento ficam em `frontend/src/styles/tokens.css`.
 
-## 💬 Funcionalidades
+## PostgreSQL
 
-- Coleta de comentários a partir do ID de um vídeo.
-- Busca das páginas de comentários disponíveis na API do YouTube.
-- Indicador de carregamento durante a coleta.
-- Visualização de 10 comentários por página.
-- Download de todos os comentários coletados em um arquivo CSV.
-- Exibição de mensagens quando ocorre algum erro na busca.
+Instale as dependências do backend e ajuste o `backend/.env`:
 
-A coleta inclui os comentários principais. As respostas feitas a esses comentários não são incluídas.
-
-## 📊 Dados coletados
-
-Para cada comentário, são preservados os seguintes dados:
-
-| Campo | Descrição |
-| --- | --- |
-| `autor` | Nome do autor do comentário. |
-| `texto` | Texto do comentário. |
-| `likes` | Quantidade de curtidas. |
-| `timestamp` | Data e hora da publicação do comentário. |
-
-O CSV é gerado no navegador, **sem cabeçalho**, com os dados nessa mesma ordem. Os campos são separados por ponto e vírgula (`;`), com suporte a acentos, aspas e quebras de linha.
-
-Exemplo fictício de uma linha:
-
-```csv
-"Ana";"Gostei do vídeo!";"2";"2026-10-17T12:00:00Z"
-```
-
-## 💻 Tecnologias
-
-| Parte | Tecnologias |
-| --- | --- |
-| Frontend | React, TypeScript, Vite e CSS Modules. |
-| Backend | Python, FastAPI, Uvicorn e Requests. |
-| Coleta | YouTube Data API v3. |
-| Configuração do backend | Variáveis de ambiente com python-dotenv. |
-
-## Como funciona
-
-1. O usuário informa o ID do vídeo na interface.
-2. O React envia esse ID para a rota `POST /comentarios` do backend.
-3. O backend faz requisições à API do YouTube e percorre as páginas disponíveis.
-4. Ao terminar a coleta, devolve os comentários em uma resposta JSON.
-5. O frontend mostra os dados com paginação e permite gerar o CSV para download.
-
-A troca de página na tela utiliza os comentários já coletados, sem fazer uma nova consulta ao YouTube.
-
-## 🚀 Executando o projeto
-
-Você precisa ter Python, Node.js com npm e uma chave de API com acesso à YouTube Data API v3.
-
-### Backend
-
-Na raiz do projeto, instale as dependências:
-
-```powershell
-python -m pip install -r backend/requirements.txt
-```
-
-Crie o arquivo `backend/.env` seguindo o modelo de `backend/.env.example`:
-
-```env
+```dotenv
+YOUTUBENER_PG_DSN="host=127.0.0.1 port=5432 dbname=YoutubeNER user=seu_usuario password=SUA_SENHA"
+YOUTUBENER_PG_SCHEMA=dataset
 YOUTUBE_API_KEY=sua_chave_da_api_do_youtube
 ```
 
-O arquivo `.env` está no `.gitignore`. A chave fica no backend e não é enviada ao frontend.
+O arquivo `.env` é privado. Use a grafia exata do banco. A chave do YouTube é exigida apenas para novas coletas. Quando necessário, especifique `YOUTUBENER_PG_TABLE=comentario`, `YOUTUBENER_PG_ID=id` e `YOUTUBENER_PG_TEXT=texto` para a leitura.
 
-Inicie a API a partir da raiz:
+A sincronização lê IDs novos a cada 30 segundos por padrão (ajustável por `YOUTUBENER_PG_INTERVAL`), ou imediatamente com **Sincronizar agora**. A cópia local preserva o texto usado para os offsets: futuras edições ou exclusões no PostgreSQL não alteram esse texto. A posição na lista é só para navegação.
+
+Somente a ação **Adicionar ao PostgreSQL** grava no banco. Ela usa a tabela `dataset.comentario` com as colunas `id`, `autor`, `texto`, `likes` e `dia_hora`. O horário do YouTube é armazenado em UTC. Na primeira gravação, o backend cria `dataset.youtubener_origem` para relacionar o ID do comentário e do vídeo do YouTube ao ID original no PostgreSQL. A tabela de vínculo evita duplicatas ao repetir uma coleta. Registros históricos sem ID do YouTube são reaproveitados quando autor, texto e horário coincidem exatamente. A conta precisa de leitura e, para coletar no banco, de escrita, uso da sequência e permissão para criar a tabela de vínculo no schema na primeira vez.
+
+## Arquivos e exportação
+
+- **CSV do vídeo:** separado por ponto e vírgula, sem cabeçalho, com autor, texto, curtidas e data de publicação.
+- **CSV da coleção:** os comentários da coleção; para PostgreSQL, contém as colunas `id` e `texto`.
+- **JSONL de anotações:** um objeto por comentário marcado ou revisado. Inclui ID, texto, revisão, entidades e relações. `revisado: true` com `entidades: []` indica um exemplo negativo revisado.
+- **CSV de anotações:** uma linha por entidade, com ID original, ID do trecho, tipo, início, fim, texto do trecho e estado da revisão. As relações estão no JSONL.
+
+As anotações e o progresso são armazenados em `comentarios/colecoes/anotacoes.sqlite3`. Cada documento guarda coordenadas como `{"id":"…","start":42,"end":55,"label":"PERSON"}` e relações como `{"id":"…","source":"…","target":"…","label":"PERTENCE_A"}`. Os offsets contam pontos de código Unicode desde zero; o fim é exclusivo. Em Python, `texto[start:end]` recupera o trecho. Para fazer backup, pare o backend e copie a pasta `comentarios/colecoes/` inteira.
+
+## Executar
+
+Na raiz do projeto, usando o ambiente Python do projeto:
 
 ```powershell
+python -m pip install -r backend/requirements.txt
 python -m uvicorn backend.main:app --reload
 ```
 
-A API fica disponível em [http://127.0.0.1:8000](http://127.0.0.1:8000). A documentação interativa pode ser acessada em [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
-
-### Frontend
-
-Em outro terminal, a partir da raiz:
+Em outro terminal:
 
 ```powershell
 cd frontend
@@ -99,44 +57,4 @@ npm.cmd install
 npm.cmd run dev
 ```
 
-Abra o endereço indicado no terminal, normalmente [http://localhost:5173](http://localhost:5173).
-
-O frontend está configurado para acessar a API em `http://127.0.0.1:8000/comentarios`. Mantenha o backend e o frontend em execução para realizar a coleta.
-
-### Usando a aplicação
-
-1. Copie o ID de um vídeo. Em um endereço como `https://www.youtube.com/watch?v=8MK8fBxAHoU`, o ID é `8MK8fBxAHoU`.
-2. Informe o ID no campo da página e clique em **Coletar comentários**.
-3. Aguarde a coleta terminar.
-4. Use **Anterior** e **Próxima** para navegar pelos resultados.
-5. Clique em **Baixar CSV** para salvar todos os comentários coletados.
-
-## Estrutura principal
-
-```text
-backend/
-  main.py              # rotas, respostas e tratamento de erros
-  comentarios.py       # requisicoes ao youtube e coleta dos dados
-  requirements.txt     # dependencias do backend
-
-frontend/
-  public/youtube.svg   # icone usado no cabecalho
-  src/
-    components/        # estrutura da pagina e botoes
-    pages/Home/
-      Home.tsx         # busca e estados da tela
-      FormularioVideo.tsx
-      Comentarios.tsx  # lista e paginacao
-      csv.ts           # geracao e download do arquivo
-      tipos.ts         # tipos dos dados
-    styles/            # estilos globais
-```
-
-## Próximas etapas
-
-- [ ] Preparar e organizar o conjunto de dados para anotação.
-- [ ] Anotar as entidades nomeadas presentes nos comentários.
-- [ ] Treinar modelos de NER a partir dos dados anotados.
-- [ ] Avaliar os resultados dos modelos.
-
-Projeto em desenvolvimento para fins de pesquisa acadêmica.
+O Vite encaminha as chamadas de `/api` ao backend em `http://127.0.0.1:8000`. Para usar outra porta, defina `YOUTUBENER_API_URL` antes de iniciar o frontend. A API tem documentação em `/docs`.

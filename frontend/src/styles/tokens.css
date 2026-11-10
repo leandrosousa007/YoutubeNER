@@ -1,0 +1,57 @@
+:root {
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
+  color-scheme: light;
+  --page: #f5f7fa;
+  --surface: #fff;
+  --surface-subtle: #f6f8fc;
+  --surface-strong: #edf2f8;
+  --glass: rgb(247 249 252 / 86%);
+  --glass-strong: rgb(255 255 255 / 90%);
+  --ink: #151b28;
+  --muted: #536076;
+  --quiet: #5d6d83;
+  --line: #e2e7ef;
+  --line-control: #cdd6e4;
+  --accent: #075ac5;
+  --accent-hover: #084ca1;
+  --accent-soft: #eaf2ff;
+  --accent-line: #b9d2f9;
+  --green: #1f654a;
+  --green-soft: #edf7f1;
+  --danger: #9b233a;
+  --danger-soft: #fdf0f2;
+  --amber: #77541c;
+  --amber-soft: #fff5df;
+  --focus: #286fcf;
+  --shadow-low: 0 1px 2px rgb(25 42 70 / 4%), 0 4px 16px rgb(25 42 70 / 4%);
+  --shadow-float: 0 8px 32px rgb(25 42 70 / 8%), 0 1px 3px rgb(25 42 70 / 6%);
+  --r-sm: 0.6rem;
+  --r-md: 0.85rem;
+  --r-lg: 1.2rem;
+  --r-xl: 1.55rem;
+  --pill: 999px;
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.5rem;
+  --space-6: 2rem;
+  --space-7: 3rem;
+  --small: 0.81rem;
+  --body: 0.95rem;
+  --title: clamp(2rem, 5vw, 3.6rem);
+  --header: 4.3rem;
+  --control: 2.75rem;
+  --content: 76rem;
+  --wide: 99rem;
+  --gutter: clamp(0.8rem, 3vw, 2.75rem);
+  --ease: 170ms cubic-bezier(0.2, 0.72, 0.22, 1);
+  --blur: blur(20px) saturate(140%);
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root { --glass: #f7f9fc; --glass-strong: #fff; --blur: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root { --ease: 0ms; }
+}

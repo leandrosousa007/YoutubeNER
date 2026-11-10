@@ -1,70 +1,107 @@
-import { useState } from 'react'
-import { FormularioVideo } from './FormularioVideo'
-import { Comentarios } from './Comentarios'
-import type { Coleta } from './tipos'
-import styles from './Home.module.css'
+import { useEffect, useState } from 'react'
+import { Button } from '../../components/Button/Button'
+import { Icon, type IconName } from '../../components/Icon/Icon'
+import { Layout } from '../../components/Layout/Layout'
+import { api, mensagem, type Catalogo, type Colecao, type Postgres } from '../../features/anotacao/api'
+import { Anotacao } from './Anotacao'
+import { Biblioteca } from './Biblioteca'
+import { Entidades } from './Entidades'
+import s from './Pesquisa.module.css'
+
+type Aba = 'colecoes' | 'anotacao' | 'entidades'
+const abas: [Aba, string, IconName][] = [['colecoes', 'Coleções', 'folder'], ['anotacao', 'Anotação', 'annotate'], ['entidades', 'Entidades', 'tag']]
 
 export function Home() {
-  const [resultado, setResultado] = useState<Coleta | null>(null)
-  const [carregando, setCarregando] = useState(false)
+  const [aba, setAba] = useState<Aba>('colecoes')
+  const [colecoes, setColecoes] = useState<Colecao[]>([])
+  const [ativa, setAtiva] = useState('')
+  const [catalogo, setCatalogo] = useState<Catalogo | null>(null)
+  const [carregando, setCarregando] = useState(true)
   const [erro, setErro] = useState('')
+  const [tentativa, setTentativa] = useState(0)
+  const [postgres, setPostgres] = useState<Postgres | null>(null)
+  const colecao = colecoes.find(item => item.id === ativa)
 
-  async function buscar(videoId: string) {
-    // limpa a busca anterior
-    setResultado(null)
-    setErro('')
-    setCarregando(true)
-
-    try {
-      // pede os comentarios para a api
-      const resposta = await fetch('http://127.0.0.1:8000/comentarios', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ video_id: videoId }),
+  useEffect(() => {
+    const controller = new AbortController()
+    const init = { signal: controller.signal }
+    Promise.all([api<Colecao[]>('/api/colecoes', init), api<Catalogo>('/api/entidades', init), api<Postgres>('/api/postgres', init)])
+      .then(([itens, dados, estado]) => {
+        if (controller.signal.aborted) return
+        setColecoes(itens)
+        setCatalogo(dados)
+        setPostgres(estado)
+        setAtiva(anterior => anterior || estado.colecao || itens[0]?.id || '')
       })
-      const dados = await resposta.json()
+      .catch(erro => { if (!controller.signal.aborted) setErro(mensagem(erro)) })
+      .finally(() => { if (!controller.signal.aborted) setCarregando(false) })
+    return () => controller.abort()
+  }, [tentativa])
 
-      if (!resposta.ok) {
-        const mensagem = typeof dados.detail === 'string' ? dados.detail : 'Não foi possível coletar os comentários.'
-        throw new Error(mensagem)
-      }
+  useEffect(() => {
+    if (carregando || erro) return
+    const controller = new AbortController()
+    let executando = false
+    const timer = window.setInterval(async () => {
+      if (executando) return
+      executando = true
+      try {
+        const init = { signal: controller.signal }
+        const [itens, estado] = await Promise.all([api<Colecao[]>('/api/colecoes', init), api<Postgres>('/api/postgres', init)])
+        if (controller.signal.aborted) return
+        setColecoes(itens)
+        setPostgres(estado)
+        setAtiva(anterior => anterior || estado.colecao || itens[0]?.id || '')
+      } catch { /* mantém a coleção visível durante uma interrupção da conexão */ }
+      finally { executando = false }
+    }, 5000)
+    return () => { controller.abort(); window.clearInterval(timer) }
+  }, [carregando, erro])
 
-      setResultado(dados)
-    } catch (erro) {
-      setErro(erro instanceof Error ? erro.message : 'Não foi possível conectar à API.')
-    } finally {
-      setCarregando(false)
-    }
+  function abrir(item: Colecao) {
+    setAtiva(item.id)
+    setAba('anotacao')
   }
 
+  async function atualizarColecoes() {
+    const [itens, estado] = await Promise.all([api<Colecao[]>('/api/colecoes'), api<Postgres>('/api/postgres')])
+    setPostgres(estado)
+    setColecoes(itens)
+    setAtiva(anterior => anterior || estado.colecao || itens[0]?.id || '')
+  }
+
+  async function sincronizar() {
+    await api<Postgres>('/api/postgres/sincronizar', { method: 'POST' })
+    await atualizarColecoes()
+  }
+
+  const navigation = <nav className={s.tabs} aria-label="Seções da ferramenta">
+    {abas.map(([id, rotulo, icon]) => (
+      <button key={id} type="button" aria-current={aba === id ? 'page' : undefined} onClick={() => setAba(id)}>
+        <Icon name={icon} width="17" height="17" />{rotulo}
+      </button>
+    ))}
+  </nav>
+  const accessory = postgres?.estado === 'ativo'
+    ? <span className={s.connection}><span aria-hidden="true" />PostgreSQL conectado</span>
+    : undefined
+
   return (
-    <>
-      <section className={styles.intro} aria-labelledby="introducao">
-        <h1 id="introducao">Comentários do YouTube</h1>
-        <p>Informe o ID do vídeo para ver os comentários e baixar os dados em CSV.</p>
-      </section>
-
-      <FormularioVideo carregando={carregando} buscar={buscar} />
-
-      {erro && <p className={styles.error} role="alert">{erro}</p>}
-      {carregando && (
-        <div className={styles.loading} role="status">
-          <span className={styles.spinner} aria-hidden="true" />
-          <div>
-            <p>Coletando comentários…</p>
-            <span>Aguarde até a coleta de todas as páginas terminar.</span>
-          </div>
+    <Layout navigation={navigation} accessory={accessory} wide={aba === 'anotacao'} home={() => setAba('colecoes')}>
+      {carregando ? <p className={s.empty} role="status">Carregando a biblioteca…</p> : erro ? (
+        <div className={s.alert} role="alert">{erro} Confira se o backend está rodando.{' '}
+          <Button variant="secondary" onClick={() => { setCarregando(true); setErro(''); setTentativa(n => n + 1) }}>Tentar de novo</Button>
         </div>
+      ) : (
+        <>
+          {aba === 'colecoes' && <Biblioteca colecoes={colecoes} postgres={postgres} sincronizar={sincronizar}
+            abrir={abrir} atualizarColecoes={atualizarColecoes} />}
+          {aba === 'anotacao' && <Anotacao key={ativa} colecoes={colecoes} colecao={colecao} tipos={catalogo?.tipos ?? []} removidos={catalogo?.removidos ?? []}
+            selecionar={setAtiva} atualizar={item => setColecoes(itens => itens.map(c => c.id === item.id ? item : c))}
+            irParaColecoes={() => setAba('colecoes')} />}
+          {aba === 'entidades' && catalogo && <Entidades catalogo={catalogo} atualizar={setCatalogo} />}
+        </>
       )}
-
-      {resultado && <Comentarios comentarios={resultado.comentarios} />}
-
-      {!resultado && !carregando && !erro && (
-        <div className={`${styles.results} ${styles.empty}`}>
-          <h2>Os comentários aparecerão aqui</h2>
-          <p>Depois da coleta, você pode navegar pelas páginas ou baixar todos os dados.</p>
-        </div>
-      )}
-    </>
+    </Layout>
   )
 }

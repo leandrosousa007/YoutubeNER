@@ -40,8 +40,10 @@ def buscar_comentarios(video_id):
 
         # guarda os dados de cada comentario
         for item in dados.get("items", []):
-            snippet = item["snippet"]["topLevelComment"]["snippet"]
+            comentario = item["snippet"]["topLevelComment"]
+            snippet = comentario["snippet"]
             lista_comentarios.append({
+                "youtube_id": comentario["id"],
                 "autor": snippet.get("authorDisplayName"),
                 "texto": snippet.get("textDisplay"),
                 "likes": snippet.get("likeCount"),

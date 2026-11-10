@@ -1,19 +1,14 @@
 .button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5rem;
-  min-height: 46px;
-  padding: 0.7rem 1.15rem;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  font: inherit;
-  font-size: 0.875rem;
-  font-weight: 600;
-  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2);
+  min-height: var(--control); padding: 0.53rem 0.96rem; border: 1px solid transparent; border-radius: var(--pill);
+  color: var(--ink); font: inherit; font-size: 0.89rem; font-weight: 650; text-align: center; line-height: 1.2;
+  transition: background var(--ease), border-color var(--ease), color var(--ease), transform var(--ease);
 }
-.primary { background: #d00; color: #fff; }
-.primary:hover { background: #b00; }
-.secondary { border-color: #d4d4d4; background: #fff; color: #333; }
-.secondary:hover { border-color: #c00; background: #fff5f5; color: #c00; }
-.button:disabled { opacity: 0.45; cursor: not-allowed; }
+.button:enabled:active { transform: scale(0.98); }
+.primary { background: var(--accent); color: #fff; }
+.primary:enabled:hover { background: var(--accent-hover); }
+.secondary { border-color: var(--line); background: var(--surface); color: var(--accent); }
+.secondary:enabled:hover { background: var(--accent-soft); border-color: var(--accent-line); }
+.danger { background: var(--danger-soft); color: var(--danger); }
+.danger:enabled:hover { background: #f9dfe4; }
+.button:disabled { opacity: 0.54; cursor: not-allowed; }

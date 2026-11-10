@@ -1,15 +1,43 @@
+import asyncio
+from contextlib import asynccontextmanager, suppress
+import re
+
 import uvicorn
 import requests
+import psycopg
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 if __package__:
     from .comentarios import buscar_comentarios, ConfiguracaoYouTubeError
+    from .anotacao_api import router
+    from .corpus import gerar_csv, iniciar_banco
+    from .postgres_sync import sincronizacao_continua, sincronizar_postgres, status_postgres
+    from .coleta_postgres import gravar_coleta
 else:
     from comentarios import buscar_comentarios, ConfiguracaoYouTubeError
+    from anotacao_api import router
+    from corpus import gerar_csv, iniciar_banco
+    from postgres_sync import sincronizacao_continua, sincronizar_postgres, status_postgres
+    from coleta_postgres import gravar_coleta
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_app):
+    iniciar_banco()
+    tarefa = asyncio.create_task(sincronizacao_continua())
+    try:
+        yield
+    finally:
+        tarefa.cancel()
+        with suppress(asyncio.CancelledError):
+            await tarefa
+
+
+app = FastAPI(lifespan=lifespan)
+app.include_router(router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,7 +46,7 @@ app.add_middleware(
                     "http://localhost:5173",
                     "http://127.0.0.1:5173"
                     ],
-    allow_methods=["POST", "GET"],
+    allow_methods=["POST", "GET", "PUT", "DELETE"],
     allow_headers=["Content-Type"],
 )
 
@@ -47,13 +75,45 @@ def buscar_snippets(video: VideoRequest):
         if motivo == "videoNotFound":
             raise HTTPException(status_code=404, detail="Vídeo não encontrado.") from erro
         raise HTTPException(status_code=502, detail="Não foi possível buscar os comentários no YouTube.") from erro
-    except (requests.exceptions.RequestException, ValueError) as erro:
+    except (requests.exceptions.RequestException, ValueError, KeyError, TypeError) as erro:
         raise HTTPException(status_code=502, detail="Resposta inválida ou falha de conexão com o YouTube.") from erro
 
     return {
         "total" : len(comentarios),
         "comentarios": comentarios
         }
+
+
+def validar_video(video: VideoRequest):
+    video_id = video.video_id.strip()
+    if not re.fullmatch(r"[a-zA-Z0-9_-]{11}", video_id):
+        raise HTTPException(422, "Informe o ID do vídeo do YouTube (11 caracteres).")
+    return video_id
+
+
+@app.post("/api/coleta/csv")
+def coletar_csv(video: VideoRequest):
+    video_id = validar_video(video)
+    comentarios = buscar_snippets(VideoRequest(video_id=video_id))["comentarios"]
+    return Response(gerar_csv(comentarios), media_type="text/csv",
+                    headers={"Content-Disposition": f'attachment; filename="comentarios-{video_id}.csv"'})
+
+
+@app.post("/api/coleta/postgres", status_code=201)
+def coletar_e_gravar(video: VideoRequest):
+    video_id = validar_video(video)
+    if status_postgres()["estado"] == "sem_configuracao":
+        raise HTTPException(409, "Configure a conexão com o PostgreSQL antes da coleta.")
+    comentarios = buscar_snippets(VideoRequest(video_id=video_id))["comentarios"]
+    try:
+        resultado = gravar_coleta(video_id, comentarios)
+    except (psycopg.errors.LockNotAvailable, psycopg.errors.QueryCanceled) as erro:
+        raise HTTPException(503, "O PostgreSQL está ocupado. Tente de novo em instantes.") from erro
+    except psycopg.Error as erro:
+        raise HTTPException(502, "Não foi possível gravar no PostgreSQL. Confira a conexão e as permissões.") from erro
+    except ValueError as erro:
+        raise HTTPException(422, "A coleta não pôde ser preparada para gravação.") from erro
+    return {**resultado, "sincronizacao": sincronizar_postgres()}
 
 @app.get("/")
 def inicio():

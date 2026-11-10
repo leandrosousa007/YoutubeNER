@@ -1,35 +1,12 @@
-# API de comentários do YouTube
+# API do YouTubeNER
 
-Na raiz do projeto, instale as dependências e inicie a API:
+Inicie o backend com `python -m uvicorn backend.main:app --reload` na raiz do projeto. A documentação interativa fica em `http://127.0.0.1:8000/docs`.
 
-```powershell
-python -m pip install -r backend/requirements.txt
-python -m uvicorn backend.main:app --reload
-```
+- `POST /api/coleta/postgres`: recebe `{"video_id":"8MK8fBxAHoU"}`, coleta os comentários principais e grava os novos em `dataset.comentario`.
+- `POST /api/coleta/csv`: recebe o mesmo corpo e baixa a coleta em CSV sem gravar no banco.
+- `GET /api/postgres` e `POST /api/postgres/sincronizar`: status e sincronização imediata.
+- `GET /api/entidades` e `POST /api/entidades`: listar e criar tipos.
+- `DELETE /api/entidades/{codigo}` e `POST /api/entidades/{codigo}/restaurar`: retirar e reativar tipos sem apagar anotações existentes.
+- `/api/colecoes`: biblioteca, consulta por ID, anotações, grupos, exclusão de marcações e exportações.
 
-Configure `YOUTUBE_API_KEY` em `backend/.env` usando `backend/.env.example`
-como referência, ou defina essa variável no ambiente. O arquivo `.env` não deve
-ser compartilhado. A chave precisa ter acesso à YouTube Data API v3.
-
-Acesse a documentação interativa em <http://127.0.0.1:8000/docs>.
-
-Envie `POST /comentarios` com o ID do vídeo, sem validação de formato:
-
-```json
-{"video_id": "8MK8fBxAHoU"}
-```
-
-A resposta contém `total` e `comentarios`. Cada comentário contém `autor`,
-`texto`, `likes` e `timestamp`. A coleta percorre todas as páginas de comentários
-principais; respostas a comentários não são incluídas. Os resultados são
-devolvidos na resposta HTTP, sem gravar um arquivo compartilhado entre requisições.
-
-Erros retornam o campo `detail`:
-
-- `422`: campo `video_id` ausente ou com tipo diferente de texto.
-- `403`: comentários desativados.
-- `404`: vídeo não encontrado.
-- `502`: falha no YouTube, inclusive chave recusada ou cota esgotada.
-- `503`: chave não configurada.
-- `504`: tempo de resposta do YouTube esgotado.
-
+Configure `YOUTUBE_API_KEY` e `YOUTUBENER_PG_DSN` no `backend/.env`. A tabela auxiliar `dataset.youtubener_origem` é criada na primeira coleta gravada e vincula IDs do YouTube a IDs do PostgreSQL. A sincronização lê do PostgreSQL; progresso, coordenadas e relações são salvos localmente. 

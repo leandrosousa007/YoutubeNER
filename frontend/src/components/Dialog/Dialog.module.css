@@ -1,0 +1,22 @@
+.dialog, .sheet {
+  color: var(--ink); background: transparent; border: 0; padding: 0;
+  width: min(calc(100% - 2 * var(--gutter)), 31rem); max-height: min(88dvh, 49rem);
+  overflow: auto; overscroll-behavior: contain; border-radius: var(--r-xl);
+}
+.dialog::backdrop, .sheet::backdrop { background: rgb(17 30 51 / 32%); backdrop-filter: var(--blur); }
+.inner { background: var(--surface); border: 1px solid var(--line); padding: var(--space-5); border-radius: var(--r-xl); }
+.header { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.header h2 { margin: 0; font-size: 1.48rem; line-height: 1.15; letter-spacing: -0.035em; }
+.header button {
+  border: 0; border-radius: var(--pill); background: var(--surface-strong); color: var(--muted);
+  display: grid; place-items: center; width: var(--control); height: var(--control); cursor: pointer; flex-shrink: 0;
+}
+.header button:hover { background: var(--accent-soft); color: var(--accent); }
+.description { color: var(--muted); margin: var(--space-2) 0 0; }
+.content { margin-top: var(--space-4); }
+.dialog[open], .sheet[open] { animation: appear var(--ease) both; }
+@keyframes appear { from { opacity: 0; transform: translateY(0.35rem); } to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 55rem) {
+  .sheet { width: 100%; max-width: 100%; max-height: min(80dvh, 42rem); margin: auto 0 0; border-radius: var(--r-xl) var(--r-xl) 0 0; }
+  .sheet .inner { padding: var(--space-4) var(--gutter) max(var(--space-4), env(safe-area-inset-bottom)); border-radius: inherit; }
+}
