@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type CSSProperties, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import { Button } from '../../components/Button/Button'
 import { Dialog } from '../../components/Dialog/Dialog'
 import { Icon } from '../../components/Icon/Icon'
@@ -22,8 +22,14 @@ type Props = {
 }
 
 const TAMANHO = 20
+const VALIDADE_PREFETCH_MS = 30_000
 const MEDIA_COMPACTA = '(max-width: 55rem)'
 const numero = (n: number) => n.toLocaleString('pt-BR')
+
+function buscarPagina(id: string, inicio: number, signal: AbortSignal) {
+  const query = new URLSearchParams({ inicio: String(inicio), tamanho: String(TAMANHO) })
+  return api<Pagina>(apiColecao(id) + '/pagina?' + query, { signal })
+}
 
 function lerTrecho(elemento: HTMLElement): Trecho | null {
   const selecao = window.getSelection()
@@ -43,6 +49,7 @@ function lerTrecho(elemento: HTMLElement): Trecho | null {
 export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atualizar, irParaColecoes, usuario }: Props) {
   const [pos, setPos] = useState<number | null>(null)
   const [pagina, setPagina] = useState<Pagina | null>(null)
+  const antecipada = useRef<{ chave: string; pagina: Pagina; carregadaEm: number } | null>(null)
   const [detalhe, setDetalhe] = useState<Comentario | null>(null)
   const [trecho, setTrecho] = useState<Trecho | null>(null)
   const [marca, setMarca] = useState<Entidade | null>(null)
@@ -70,7 +77,9 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     (item.revisado || item.estado === 'enviado' || (item.autor && item.autor !== usuario.login)))
   const porCodigo = new Map([...tipos, ...removidos].map(t => [t.codigo, t]))
   const sobreposta = trecho && item?.entidades.some(e => sobrepoe(e, trecho))
-  const linhas = pagina?.comentarios[0]?.pos === inicio ? pagina.comentarios : []
+  const inicioCarregado = pagina?.comentarios[0]?.pos
+  const linhas = pagina && inicioCarregado === inicio ? pagina.comentarios : []
+  const chavePagina = `${id}:${total}:${atualizacao}`
   const faltam = total - (colecao?.revisados ?? 0)
   const capturar = useCallback((elemento: HTMLElement, posicao: number) => {
     const selecao = lerTrecho(elemento)
@@ -112,12 +121,29 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
 
   useEffect(() => {
     if (!id || inicio === null) return
+    const cache = antecipada.current
+    if (cache?.chave === `${chavePagina}:${inicio}` && Date.now() - cache.carregadaEm < VALIDADE_PREFETCH_MS) {
+      setPagina(cache.pagina)
+      return
+    }
     const controller = new AbortController()
-    api<Pagina>(apiColecao(id) + '/pagina?inicio=' + inicio + '&tamanho=' + TAMANHO, { signal: controller.signal })
+    buscarPagina(id, inicio, controller.signal)
       .then(dados => { if (!controller.signal.aborted) setPagina(dados) })
       .catch(erro => { if (!controller.signal.aborted) setErro(mensagem(erro)) })
     return () => controller.abort()
-  }, [id, inicio, total, atualizacao])
+  }, [id, inicio, chavePagina])
+
+  useEffect(() => {
+    if (!id || inicio === null || inicioCarregado !== inicio || inicio + TAMANHO > total) return
+    const controller = new AbortController()
+    const proxima = inicio + TAMANHO
+    buscarPagina(id, proxima, controller.signal)
+      .then(dados => {
+        if (!controller.signal.aborted) antecipada.current = { chave: `${chavePagina}:${proxima}`, pagina: dados, carregadaEm: Date.now() }
+      })
+      .catch(() => {})
+    return () => controller.abort()
+  }, [id, inicio, inicioCarregado, total, chavePagina])
 
   useEffect(() => {
     if (!id || pos === null) return
@@ -160,6 +186,9 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   function receber(dados: { comentario: Comentario; colecao: Colecao }) {
     if (dados.comentario.pos === pos) setDetalhe(dados.comentario)
     if (conjunto) { setRevisaoGrupos(n => n+1); return }
+    if (antecipada.current?.pagina.comentarios.some(linha => linha.pos === dados.comentario.pos)) {
+      antecipada.current = null
+    }
     setPagina(anterior => anterior ? { ...anterior,
       comentarios: anterior.comentarios.map(linha => linha.pos === dados.comentario.pos ? dados.comentario : linha),
     } : anterior)

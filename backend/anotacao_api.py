@@ -145,37 +145,54 @@ def proximo(colecao, depois, revisao):
         return {"pos": item["pos"] if item else None}
 
 
-def obter_comentario(db, colecao, pos):
-    comentario = db.execute("SELECT * FROM comentarios WHERE colecao = ? AND pos = ?", (colecao, pos)).fetchone()
-    if comentario is None:
-        raise HTTPException(404, "Comentário não encontrado.")
+def consultar_comentarios(db, colecao, inicio, tamanho):
+    colunas = "c.*"
+    tarefas = ""
+    if enabled():
+        colunas += """, t.autor, t.estado,
+            CASE WHEN t.estado = 'ajuste' THEN (
+                SELECT h.anterior->>'feedback' FROM historico h
+                WHERE h.colecao=c.colecao AND h.pos=c.pos
+                    AND h.acao='ajuste' AND h.conjunto IS NULL
+                ORDER BY h.id DESC LIMIT 1
+            ) END AS feedback"""
+        tarefas = "LEFT JOIN tarefas t USING (colecao,pos)"
+    return db.execute(f"""SELECT {colunas} FROM comentarios c {tarefas}
+        WHERE c.colecao = ? AND c.pos >= ? ORDER BY c.pos LIMIT ?""",
+        (colecao, inicio, tamanho))
+
+
+def serializar_comentario(comentario, *, resumo=False):
+    pos = comentario["pos"]
     documento = decodificar(comentario["anotacao_json"], {"spans": [], "relations": []})
     entidades = [{"id": e["id"], "inicio": e["start"], "fim": e["end"], "tipo": e["label"],
                   "texto": comentario["texto"][e["start"]:e["end"]]} for e in documento["spans"]]
     resultado = {"pos": pos, "id": comentario["id_origem"] or str(pos), "texto": comentario["texto"], "revisado": bool(comentario["revisado"]),
-            "versao": comentario["versao"], "entidades": entidades, "relacoes": documento["relations"],
-            "rejeitadas": decodificar(comentario["rejeitadas"], [])}
+            "versao": comentario["versao"], "entidades": entidades, "relacoes": documento["relations"]}
+    if not resumo:
+        resultado["rejeitadas"] = decodificar(comentario["rejeitadas"], [])
     if enabled():
-        tarefa = db.execute("SELECT autor,estado FROM tarefas WHERE colecao=? AND pos=?", (colecao,pos)).fetchone()
-        resultado.update(dict(tarefa) if tarefa else {"autor":None,"estado":"revisado" if resultado["revisado"] else "pendente"})
+        estado = comentario["estado"]
+        resultado.update(autor=comentario["autor"], estado=estado or ("revisado" if resultado["revisado"] else "pendente"))
         if resultado["estado"] == "ajuste":
-            nota = db.execute("""SELECT anterior->>'feedback' AS feedback FROM historico WHERE colecao=? AND pos=?
-                AND acao='ajuste' AND conjunto IS NULL ORDER BY id DESC LIMIT 1""", (colecao,pos)).fetchone()
-            resultado["feedback"] = nota["feedback"] if nota else None
+            resultado["feedback"] = comentario["feedback"]
     return resultado
+
+
+def obter_comentario(db, colecao, pos):
+    comentario = consultar_comentarios(db, colecao, pos, 1).fetchone()
+    if comentario is None or comentario["pos"] != pos:
+        raise HTTPException(404, "Comentário não encontrado.")
+    return serializar_comentario(comentario)
 
 
 @router.get("/colecoes/{colecao}/pagina")
 def carregar_pagina(colecao: ColecaoId, inicio: int = Query(1, ge=1), tamanho: int = Query(20, ge=1, le=50)):
     with banco() as db:
-        db.execute("BEGIN")
+        if not enabled():
+            db.execute("BEGIN")
         item = obter_colecao(db, colecao)
-        dados = []
-        for r in db.execute("SELECT pos FROM comentarios WHERE colecao = ? AND pos >= ? ORDER BY pos LIMIT ?",
-                            (colecao, inicio, tamanho)):
-            comentario = obter_comentario(db, colecao, r["pos"])
-            del comentario["rejeitadas"]
-            dados.append(comentario)
+        dados = [serializar_comentario(r, resumo=True) for r in consultar_comentarios(db, colecao, inicio, tamanho)]
         return {"colecao": item, "comentarios": dados}
 
 

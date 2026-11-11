@@ -100,6 +100,8 @@ def iniciar_pg(tipos):
           ator text NOT NULL, acao text NOT NULL, anterior jsonb NOT NULL, criado_em timestamptz DEFAULT now()
         );
         ALTER TABLE historico ADD COLUMN IF NOT EXISTS conjunto text;
+        CREATE INDEX IF NOT EXISTS historico_ajuste_principal ON historico(colecao,pos,id DESC)
+          WHERE acao='ajuste' AND conjunto IS NULL;
         CREATE TABLE IF NOT EXISTS conjuntos (
           colecao text NOT NULL, pos integer NOT NULL, autor text NOT NULL REFERENCES usuarios(login),
           estado text NOT NULL, versao integer NOT NULL, documento jsonb NOT NULL,
