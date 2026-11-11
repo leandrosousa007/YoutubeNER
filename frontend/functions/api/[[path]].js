@@ -21,5 +21,5 @@ export async function onRequest({ request, env }) {
     const resposta = new Response(r.body, r)
     resposta.headers.set('Cache-Control', 'no-store')
     return resposta
-  } catch { return Response.json({ detail: 'O servidor da Oracle não respondeu.' }, { status: 502 }) }
+  } catch { return Response.json({ detail: 'O servidor da API não respondeu. Tente novamente em instantes.' }, { status: 502 }) }
 }

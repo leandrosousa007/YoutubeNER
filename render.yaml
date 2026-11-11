@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: youtubener-api
+    runtime: docker
+    plan: free
+    dockerfilePath: ./deploy/Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    previews:
+      generation: "off"
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: YOUTUBENER_PRODUCTION
+        value: "1"
+      - key: YOUTUBENER_APP_DSN
+        sync: false
+      - key: YOUTUBENER_PG_DSN
+        sync: false
+      - key: YOUTUBENER_EDGE_SECRET
+        sync: false
+      - key: YOUTUBENER_WEB_ORIGIN
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: YOUTUBENER_PG_SCHEMA
+        value: dataset
+      - key: YOUTUBENER_PG_TABLE
+        value: comentario
+      - key: YOUTUBENER_PG_INTERVAL
+        value: "900"
+      - key: YOUTUBENER_DATA_DIR
+        value: /data
