@@ -1,5 +1,7 @@
 # YouTubeNER
 
+Para publicar o frontend na Cloudflare Pages e o backend e PostgreSQL na Oracle, siga o [guia de implantação](deploy/ORACLE-CLOUDFLARE.md).
+
 Ferramenta local de coleta e anotação de comentários do YouTube para pesquisa em Processamento de Linguagem Natural. O corpus é usado na anotação de entidades nomeadas e poderá servir para treinar modelos de NER.
 
 ## Coletar e anotar

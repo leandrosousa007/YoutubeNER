@@ -1,12 +1,15 @@
 import csv
 import io
 import json
+from datetime import date
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Path, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from .security import usuario
+from .pg_storage import enabled
 
 if __package__:
     from .corpus import PASTA, banco
@@ -50,6 +53,11 @@ class Revisao(BaseModel):
     entidades: list[Marcacao] = Field(max_length=500)
     rejeitadas: list[Marcacao] = Field(max_length=500)
     relacoes: list[Relacao] | None = Field(default=None, max_length=500)
+    ajuste: str | None = Field(default=None, max_length=1000)
+
+
+def decodificar(valor, padrao):
+    return json.loads(valor) if isinstance(valor, str) else valor if valor is not None else padrao
 
 
 def obter_colecao(db, colecao):
@@ -93,8 +101,42 @@ def baixar_csv(colecao: ColecaoId):
 
 @router.get("/colecoes/{colecao}/pendente")
 def localizar_pendente(colecao: ColecaoId, depois: int = Query(0, ge=0)):
+    if enabled():
+        raise HTTPException(405, "Use a fila de trabalho para reservar o próximo comentário.")
+    return proximo(colecao, depois, False)
+
+
+@router.post("/colecoes/{colecao}/proximo")
+def reservar_proximo(colecao: ColecaoId, depois: int = Query(0, ge=0), revisao: bool = False):
+    return proximo(colecao, depois, revisao)
+
+
+def proximo(colecao, depois, revisao):
     with banco() as db:
         obter_colecao(db, colecao)
+        pessoa = usuario.get()
+        if pessoa:
+            db.execute("BEGIN IMMEDIATE")
+            if revisao:
+                if pessoa["papel"] == "anotador":
+                    raise HTTPException(403)
+                item = db.execute("""SELECT pos FROM tarefas WHERE colecao=? AND estado='enviado'
+                    ORDER BY (pos <= ?), pos LIMIT 1""", (colecao,depois)).fetchone()
+                return {"pos": item["pos"] if item else None}
+            item = db.execute("""SELECT c.pos FROM comentarios c LEFT JOIN tarefas t USING(colecao,pos)
+                WHERE c.colecao=? AND c.revisado=0 AND
+                (t.pos IS NULL OR (t.estado IN ('rascunho','ajuste') AND t.autor=?) OR
+                 (t.estado='rascunho' AND c.versao=0 AND t.expira<now()))
+                ORDER BY CASE WHEN ?=0 AND t.autor=? THEN 0 ELSE 1 END, (c.pos <= ?), c.pos LIMIT 1""",
+                (colecao,pessoa["login"],depois,pessoa["login"],depois)).fetchone()
+            if item:
+                db.execute("""DELETE FROM tarefas t USING comentarios c WHERE t.colecao=c.colecao AND t.pos=c.pos
+                    AND t.colecao=? AND t.autor=? AND t.pos<>? AND t.estado='rascunho' AND c.versao=0""",
+                    (colecao,pessoa["login"],item["pos"]))
+                db.execute("""INSERT INTO tarefas VALUES (?,?,?,'rascunho',now()+interval '30 minutes')
+                    ON CONFLICT(colecao,pos) DO UPDATE SET autor=excluded.autor,expira=excluded.expira""",
+                    (colecao,item["pos"],pessoa["login"]))
+            return {"pos": item["pos"] if item else None}
         item = db.execute("SELECT pos FROM comentarios WHERE colecao = ? AND revisado = 0 AND pos > ? ORDER BY pos LIMIT 1",
                           (colecao, depois)).fetchone()
         if item is None and depois:
@@ -107,16 +149,24 @@ def obter_comentario(db, colecao, pos):
     comentario = db.execute("SELECT * FROM comentarios WHERE colecao = ? AND pos = ?", (colecao, pos)).fetchone()
     if comentario is None:
         raise HTTPException(404, "Comentário não encontrado.")
-    documento = json.loads(comentario["anotacao_json"] or '{"spans":[],"relations":[]}')
+    documento = decodificar(comentario["anotacao_json"], {"spans": [], "relations": []})
     entidades = [{"id": e["id"], "inicio": e["start"], "fim": e["end"], "tipo": e["label"],
                   "texto": comentario["texto"][e["start"]:e["end"]]} for e in documento["spans"]]
-    return {"pos": pos, "id": comentario["id_origem"] or str(pos), "texto": comentario["texto"], "revisado": bool(comentario["revisado"]),
+    resultado = {"pos": pos, "id": comentario["id_origem"] or str(pos), "texto": comentario["texto"], "revisado": bool(comentario["revisado"]),
             "versao": comentario["versao"], "entidades": entidades, "relacoes": documento["relations"],
-            "rejeitadas": json.loads(comentario["rejeitadas"])}
+            "rejeitadas": decodificar(comentario["rejeitadas"], [])}
+    if enabled():
+        tarefa = db.execute("SELECT autor,estado FROM tarefas WHERE colecao=? AND pos=?", (colecao,pos)).fetchone()
+        resultado.update(dict(tarefa) if tarefa else {"autor":None,"estado":"revisado" if resultado["revisado"] else "pendente"})
+        if resultado["estado"] == "ajuste":
+            nota = db.execute("""SELECT anterior->>'feedback' AS feedback FROM historico WHERE colecao=? AND pos=?
+                AND acao='ajuste' AND conjunto IS NULL ORDER BY id DESC LIMIT 1""", (colecao,pos)).fetchone()
+            resultado["feedback"] = nota["feedback"] if nota else None
+    return resultado
 
 
 @router.get("/colecoes/{colecao}/pagina")
-def carregar_pagina(colecao: ColecaoId, inicio: int = Query(1, ge=1), tamanho: int = Query(10, ge=1, le=30)):
+def carregar_pagina(colecao: ColecaoId, inicio: int = Query(1, ge=1), tamanho: int = Query(20, ge=1, le=50)):
     with banco() as db:
         db.execute("BEGIN")
         item = obter_colecao(db, colecao)
@@ -143,19 +193,159 @@ def localizar_id(colecao: ColecaoId, id: str = Query(min_length=1, max_length=10
         return {"pos": r["pos"]}
 
 
-@router.get("/colecoes/{colecao}/comentarios/{pos}")
-def abrir_comentario(colecao: ColecaoId, pos: int):
+@router.get("/colecoes/{colecao}/busca")
+def buscar(colecao: ColecaoId, texto: str = Query("", max_length=200), tipo: str = Query("", max_length=24),
+           autor: str = Query("", max_length=100), estado: str = Query("", max_length=20), depois: int = Query(0, ge=0),
+           video: str = Query("", max_length=11), de: date | None = None, ate: date | None = None):
+    condicoes = ["c.colecao=?", "c.pos>?"]
+    params = [colecao, depois]
+    if texto.strip():
+        condicoes.append("instr(lower(c.texto),lower(?))>0" if not enabled() else "strpos(lower(c.texto),lower(?))>0")
+        params.append(texto.strip())
+    colaborativo = enabled()
+    if not colaborativo and (autor or estado):
+        raise HTTPException(422, "Os filtros por anotador e etapa exigem o modo colaborativo.")
+    principal, independente, valores = [], [], []
+    if tipo:
+        principal.append("EXISTS (SELECT 1 FROM json_each(c.anotacao_json, '$.spans') e WHERE json_extract(e.value, '$.label')=?)")
+        independente.append("EXISTS (SELECT 1 FROM jsonb_array_elements(i.documento->'spans') e WHERE e.value->>'label'=?)")
+        valores.append(tipo)
+    if autor:
+        principal.append("t.autor=?")
+        independente.append("i.autor=?")
+        valores.append(autor.strip().lower())
+    if estado:
+        principal.append("COALESCE(t.estado,CASE WHEN c.revisado=1 THEN 'revisado' ELSE 'pendente' END)=?")
+        independente.append("i.estado=?")
+        valores.append(estado)
+    if principal:
+        filtro = "(" + " AND ".join(principal) + ")"
+        params.extend(valores)
+        if colaborativo:
+            params.extend(valores)
+            pessoa = usuario.get()
+            if pessoa and pessoa["papel"] == "anotador":
+                independente.append("i.autor=?")
+                params.append(pessoa["login"])
+            filtro += " OR EXISTS (SELECT 1 FROM conjuntos i WHERE i.colecao=c.colecao AND i.pos=c.pos AND " + " AND ".join(independente) + ")"
+        condicoes.append("(" + filtro + ")")
+    join = " LEFT JOIN tarefas t USING(colecao,pos)" if colaborativo else ""
     with banco() as db:
-        return obter_comentario(db, colecao, pos)
+        obter_colecao(db, colecao)
+        aplicar_metadados(db, condicoes, params, video, de, ate)
+        linhas = db.execute("SELECT c.pos,COALESCE(c.id_origem,CAST(c.pos AS TEXT)) AS id,c.texto FROM comentarios c"
+                            + join + " WHERE " + " AND ".join(condicoes) + " ORDER BY c.pos LIMIT 21", params).fetchall()
+    return {"itens":[dict(r) for r in linhas[:20]], "proximo":linhas[19]["pos"] if len(linhas)>20 else None}
+
+
+def aplicar_metadados(db, condicoes, params, video, de, ate):
+    if de and ate and de > ate:
+        raise HTTPException(422, "A data inicial deve ser anterior à final.")
+    if not (video or de or ate):
+        return
+    if not enabled():
+        raise HTTPException(422, "Os filtros de vídeo e data exigem PostgreSQL.")
+    if video:
+        if not db.execute("SELECT to_regclass('dataset.youtubener_origem') AS tabela").fetchone()["tabela"]:
+            condicoes.append("FALSE")
+        else:
+            condicoes.append("EXISTS (SELECT 1 FROM dataset.youtubener_origem v WHERE v.comentario_id::text=c.id_origem AND v.video_id=?)")
+            params.append(video)
+    if de or ate:
+        partes = ["m.id::text=c.id_origem"]
+        if de:
+            partes.append("m.dia_hora>=?")
+            params.append(de)
+        if ate:
+            partes.append("m.dia_hora<?::date+1")
+            params.append(ate)
+        condicoes.append("EXISTS (SELECT 1 FROM dataset.comentario m WHERE " + " AND ".join(partes) + ")")
+
+
+@router.get("/colecoes/{colecao}/comentarios/{pos}/historico")
+def historico(colecao: ColecaoId, pos: int):
+    pessoa = usuario.get()
+    if not pessoa or pessoa["papel"] == "anotador":
+        raise HTTPException(403, "O histórico está disponível para revisores e administradores.")
+    with banco() as db:
+        return [dict(r) for r in db.execute("""SELECT ator,acao,criado_em::text,conjunto,anterior FROM historico
+            WHERE colecao=? AND pos=? ORDER BY id DESC LIMIT 30""", (colecao,pos))]
+
+
+@router.get("/colecoes/{colecao}/comentarios/{pos}")
+def abrir_comentario(colecao: ColecaoId, pos: int, conjunto: str = Query("", max_length=100)):
+    with banco() as db:
+        return obter_conjunto(db, colecao, pos, conjunto) if conjunto else obter_comentario(db, colecao, pos)
+
+
+def obter_conjunto(db, colecao, pos, conjunto):
+    pessoa = usuario.get()
+    if not pessoa or (pessoa["papel"] == "anotador" and pessoa["login"] != conjunto):
+        raise HTTPException(403, "Você só pode abrir sua anotação independente.")
+    base = obter_comentario(db, colecao, pos)
+    row = db.execute("SELECT estado,versao,documento FROM conjuntos WHERE colecao=? AND pos=? AND autor=?",
+                     (colecao,pos,conjunto)).fetchone()
+    if not row and pessoa["login"] != conjunto:
+        raise HTTPException(404, "Conjunto não encontrado.")
+    doc = row["documento"] if row else {}
+    estado = row["estado"] if row else "rascunho"
+    return {**base, "autor":conjunto,"estado":estado,"versao":row["versao"] if row else 0,
+        "revisado":estado=="revisado", "relacoes":doc.get("relations",[]), "rejeitadas":doc.get("rejeitadas",[]),
+        "feedback":doc.get("feedback"), "entidades":[{"id":s["id"],"inicio":s["start"],"fim":s["end"],"tipo":s["label"],
+        "texto":base["texto"][s["start"]:s["end"]]} for s in doc.get("spans",[])]}
+
+
+@router.get("/colecoes/{colecao}/comentarios/{pos}/conjuntos")
+def listar_conjuntos(colecao: ColecaoId, pos: int):
+    pessoa = usuario.get()
+    if not pessoa:
+        raise HTTPException(403)
+    with banco() as db:
+        obter_comentario(db,colecao,pos)
+        sql = "SELECT autor,estado,versao FROM conjuntos WHERE colecao=? AND pos=?"
+        if pessoa["papel"] == "anotador":
+            return db.execute(sql+" AND autor=?", (colecao,pos,pessoa["login"])).fetchall()
+        return db.execute(sql+" ORDER BY autor", (colecao,pos)).fetchall()
+
+
+@router.get("/colecoes/{colecao}/proximo-conjunto")
+def proximo_conjunto(colecao: ColecaoId):
+    pessoa = usuario.get()
+    if not pessoa or pessoa["papel"] == "anotador":
+        raise HTTPException(403, "A fila está disponível para revisores e administradores.")
+    with banco() as db:
+        obter_colecao(db, colecao)
+        return db.execute("""SELECT pos,autor FROM conjuntos WHERE colecao=? AND estado='enviado'
+                          ORDER BY pos,autor LIMIT 1""", (colecao,)).fetchone()
 
 
 @router.put("/colecoes/{colecao}/comentarios/{pos}")
-def salvar_revisao(colecao: ColecaoId, pos: int, revisao: Revisao):
+def salvar_revisao(colecao: ColecaoId, pos: int, revisao: Revisao, conjunto: str = ""):
     with banco() as db:
         db.execute("BEGIN IMMEDIATE")
-        atual = obter_comentario(db, colecao, pos)
+        atual = obter_conjunto(db, colecao, pos, conjunto) if conjunto else obter_comentario(db, colecao, pos)
         if atual["versao"] != revisao.versao:
             raise HTTPException(409, "Este comentário mudou em outra janela. Reabra o comentário antes de salvar.")
+        pessoa = usuario.get()
+        final = revisao.revisado
+        if pessoa:
+            anotador = pessoa["papel"] == "anotador"
+            autor = atual["autor"] or pessoa["login"]
+            if anotador and (autor != pessoa["login"] or atual["estado"] in {"enviado","revisado"} or revisao.ajuste is not None):
+                raise HTTPException(403, "Este comentário está reservado ou já foi enviado para revisão.")
+            if pessoa["papel"] == "revisor" and autor != pessoa["login"] and atual["estado"] not in {"enviado","revisado"}:
+                raise HTTPException(403, "A anotação precisa ser enviada antes de ser revisada por outra pessoa.")
+            if revisao.ajuste is not None and (not revisao.ajuste.strip() or atual["estado"] != "enviado"):
+                raise HTTPException(422, "Informe o ajuste em uma anotação enviada.")
+            final = revisao.revisado and not anotador and revisao.ajuste is None
+            estado = "ajuste" if revisao.ajuste is not None else "revisado" if final else "enviado" if revisao.revisado else (
+                "enviado" if atual["estado"] == "enviado" else "ajuste" if atual["estado"] == "ajuste" else "rascunho")
+            if not conjunto:
+                db.execute("""INSERT INTO tarefas VALUES (?,?,?,?,now()+interval '30 minutes')
+                ON CONFLICT(colecao,pos) DO UPDATE SET estado=excluded.estado,expira=excluded.expira""",
+                (colecao,pos,autor,estado))
+            db.execute("INSERT INTO historico (colecao,pos,ator,acao,anterior,conjunto) VALUES (?,?,?,?,?,?)",
+                       (colecao,pos,pessoa["login"],estado,json.dumps({**atual,"feedback":revisao.ajuste},ensure_ascii=False),conjunto or None))
         tipos = {r["codigo"]: bool(r["ativo"]) for r in db.execute("SELECT codigo, ativo FROM tipos")}
         texto = atual["texto"]
         for item in revisao.entidades + revisao.rejeitadas:
@@ -197,10 +387,17 @@ def salvar_revisao(colecao: ColecaoId, pos: int, revisao: Revisao):
             relacoes.append({"id": id_relacao, "source": r.source, "target": r.target, "label": chave[2]})
         doc = json.dumps({"spans": spans, "relations": relacoes}, ensure_ascii=False, separators=(",", ":"))
         rejeitadas = [{"inicio": e.inicio, "fim": e.fim, "tipo": e.tipo} for e in revisao.rejeitadas]
-        db.execute("""UPDATE comentarios SET revisado = ?, rejeitadas = ?, anotacao_json = ?, anotado = ?, versao = versao + 1
+        if conjunto:
+            independente = json.dumps({"spans":spans,"relations":relacoes,"rejeitadas":rejeitadas,
+                "feedback":revisao.ajuste or (atual.get("feedback") if estado=="ajuste" else None)},ensure_ascii=False)
+            db.execute("""INSERT INTO conjuntos VALUES (?,?,?,?,1,?) ON CONFLICT(colecao,pos,autor)
+                DO UPDATE SET estado=excluded.estado,versao=conjuntos.versao+1,documento=excluded.documento""",
+                (colecao,pos,conjunto,estado,independente))
+        else:
+            db.execute("""UPDATE comentarios SET revisado = ?, rejeitadas = ?, anotacao_json = ?, anotado = ?, versao = versao + 1
                    WHERE colecao = ? AND pos = ?""",
-                   (revisao.revisado, json.dumps(rejeitadas), doc, bool(spans), colecao, pos))
-        comentario = obter_comentario(db, colecao, pos)
+                   (final, json.dumps(rejeitadas), doc, bool(spans), colecao, pos))
+        comentario = obter_conjunto(db, colecao, pos, conjunto) if conjunto else obter_comentario(db, colecao, pos)
         progresso = obter_colecao(db, colecao)
     return {"comentario": comentario, "colecao": progresso}
 
@@ -218,13 +415,70 @@ def exportar(colecao: ColecaoId):
             for linha in linhas:
                 item = dict(linha)
                 item["revisado"] = bool(item["revisado"])
-                documento = json.loads(item.pop("anotacao_json") or '{"spans":[],"relations":[]}')
+                documento = decodificar(item.pop("anotacao_json"), {"spans": [], "relations": []})
                 item["entidades"] = documento["spans"]
                 item["relacoes"] = documento["relations"]
                 yield json.dumps({"colecao": colecao, **item}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(linhas(), media_type="application/x-ndjson",
                              headers={"Content-Disposition": "attachment; filename=anotacoes.jsonl"})
+
+
+@router.get("/colecoes/{colecao}/exportar")
+def exportar_filtrado(colecao: ColecaoId, formato: str = Query("jsonl", pattern="^(jsonl|csv)$"),
+                      autor: str = Query("", max_length=100), estado: str = Query("", max_length=20),
+                      video: str = Query("", max_length=11), de: date | None = None, ate: date | None = None,
+                      tipo: str = Query("", max_length=24), texto: str = Query("", max_length=200)):
+    pessoa = usuario.get()
+    if not pessoa or pessoa["papel"] == "anotador":
+        raise HTTPException(403, "As exportações filtradas são restritas a revisores e administradores.")
+    condicoes, params = ["c.colecao=?"], [colecao]
+    with banco() as db:
+        obter_colecao(db,colecao)
+        aplicar_metadados(db,condicoes,params,video,de,ate)
+    for campo, valor in (("autor",autor.strip().lower()),("estado",estado)):
+        if valor:
+            condicoes.append("a."+campo+"=?")
+            params.append(valor)
+    if texto.strip():
+        condicoes.append("strpos(lower(c.texto),lower(?))>0")
+        params.append(texto.strip())
+    if tipo:
+        condicoes.append("EXISTS (SELECT 1 FROM jsonb_array_elements(a.doc->'spans') e WHERE e.value->>'label'=?)")
+        params.append(tipo)
+    consulta = """WITH a AS (
+       SELECT c.colecao,c.pos,t.autor,COALESCE(t.estado,CASE WHEN c.revisado=1 THEN 'revisado' ELSE 'rascunho' END) AS estado,
+          c.versao,c.anotacao_json AS doc,'principal' AS conjunto
+       FROM comentarios c LEFT JOIN tarefas t USING(colecao,pos)
+       WHERE c.colecao=? AND (c.anotado=1 OR c.revisado=1 OR t.estado IN ('enviado','ajuste'))
+       UNION ALL
+       SELECT colecao,pos,autor,estado,versao,documento,'independente' FROM conjuntos WHERE colecao=?
+    )
+    SELECT c.pos,COALESCE(c.id_origem,c.pos::text) AS id,c.texto,a.autor,a.estado,a.versao,a.doc,a.conjunto
+    FROM a JOIN comentarios c USING(colecao,pos) WHERE """+" AND ".join(condicoes)+" ORDER BY c.pos,a.conjunto,a.autor"
+
+    def linhas():
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        if formato == "csv":
+            writer.writerow(("id","autor","estado","versao","conjunto","id_span","tipo","inicio","fim","trecho"))
+            yield buffer.getvalue()
+        with banco() as db:
+            for r in db.execute(consulta,(colecao,colecao,*params)):
+                item = dict(r)
+                doc = item.pop("doc") or {}
+                spans = doc.get("spans",[])
+                if formato == "jsonl":
+                    yield json.dumps({**item,"colecao":colecao,"entidades":spans,"relacoes":doc.get("relations",[])}, ensure_ascii=False)+"\n"
+                    continue
+                buffer.seek(0)
+                buffer.truncate()
+                prefixo = (item["id"],item["autor"],item["estado"],item["versao"],item["conjunto"])
+                for s in spans or [None]:
+                    writer.writerow((*prefixo,s["id"],s["label"],s["start"],s["end"],item["texto"][s["start"]:s["end"]]) if s else (*prefixo,"","","","",""))
+                yield buffer.getvalue()
+    return StreamingResponse(linhas(),media_type="text/csv" if formato=="csv" else "application/x-ndjson",
+                             headers={"Content-Disposition":f"attachment; filename=anotacoes-filtradas.{formato}"})
 
 
 def resposta_csv(colecao, arquivo, cabecalho, consulta):
@@ -237,7 +491,7 @@ def resposta_csv(colecao, arquivo, cabecalho, consulta):
         buffer.truncate()
         with banco() as db:
             for linha in db.execute(consulta, (colecao,)):
-                escritor.writerow(linha)
+                escritor.writerow(linha.values() if isinstance(linha, dict) else linha)
                 yield buffer.getvalue()
                 buffer.seek(0)
                 buffer.truncate()

@@ -2,17 +2,19 @@ import { useEffect, useState } from 'react'
 import { Button } from '../../components/Button/Button'
 import { Icon, type IconName } from '../../components/Icon/Icon'
 import { Layout } from '../../components/Layout/Layout'
-import { api, mensagem, type Catalogo, type Colecao, type Postgres } from '../../features/anotacao/api'
+import { api, mensagem, type Catalogo, type Colecao, type Postgres, type Usuario } from '../../features/anotacao/api'
 import { Anotacao } from './Anotacao'
+import { Admin } from './Admin'
 import { Biblioteca } from './Biblioteca'
 import { Entidades } from './Entidades'
 import s from './Pesquisa.module.css'
 
-type Aba = 'colecoes' | 'anotacao' | 'entidades'
-const abas: [Aba, string, IconName][] = [['colecoes', 'Coleções', 'folder'], ['anotacao', 'Anotação', 'annotate'], ['entidades', 'Entidades', 'tag']]
+type Aba = 'colecoes' | 'anotacao' | 'entidades' | 'admin'
+const abas: [Aba, string, IconName][] = [['colecoes', 'Coleções', 'folder'], ['anotacao', 'Anotação', 'annotate'], ['entidades', 'Entidades', 'tag'], ['admin', 'Administração', 'database']]
 
-export function Home() {
-  const [aba, setAba] = useState<Aba>('colecoes')
+export function Home({ usuario, sair }: { usuario: Usuario | null; sair?: () => Promise<void> }) {
+  const [aba, setAba] = useState<Aba>(() => usuario?.papel === 'admin' && location.pathname === '/admin' ? 'admin' :
+    /^\/(anotacoes|revisao)(\/|$)/.test(location.pathname) ? 'anotacao' : 'colecoes')
   const [colecoes, setColecoes] = useState<Colecao[]>([])
   const [ativa, setAtiva] = useState('')
   const [catalogo, setCatalogo] = useState<Catalogo | null>(null)
@@ -76,13 +78,13 @@ export function Home() {
   }
 
   const navigation = <nav className={s.tabs} aria-label="Seções da ferramenta">
-    {abas.map(([id, rotulo, icon]) => (
+    {abas.filter(([id]) => id !== 'admin' || usuario?.papel === 'admin').map(([id, rotulo, icon]) => (
       <button key={id} type="button" aria-current={aba === id ? 'page' : undefined} onClick={() => setAba(id)}>
         <Icon name={icon} width="17" height="17" />{rotulo}
       </button>
     ))}
   </nav>
-  const accessory = postgres?.estado === 'ativo'
+  const accessory = sair ? <Button variant="secondary" onClick={() => void sair().catch(e => setErro(mensagem(e)))}>Sair</Button> : postgres?.estado === 'ativo'
     ? <span className={s.connection}><span aria-hidden="true" />PostgreSQL conectado</span>
     : undefined
 
@@ -94,12 +96,15 @@ export function Home() {
         </div>
       ) : (
         <>
-          {aba === 'colecoes' && <Biblioteca colecoes={colecoes} postgres={postgres} sincronizar={sincronizar}
+          {aba === 'colecoes' && <Biblioteca colecoes={colecoes} postgres={postgres} sincronizar={sincronizar} usuario={usuario}
             abrir={abrir} atualizarColecoes={atualizarColecoes} />}
-          {aba === 'anotacao' && <Anotacao key={ativa} colecoes={colecoes} colecao={colecao} tipos={catalogo?.tipos ?? []} removidos={catalogo?.removidos ?? []}
+          {aba === 'anotacao' && <Anotacao key={ativa} colecoes={colecoes} colecao={colecao} tipos={catalogo?.tipos ?? []} removidos={catalogo?.removidos ?? []} usuario={usuario}
             selecionar={setAtiva} atualizar={item => setColecoes(itens => itens.map(c => c.id === item.id ? item : c))}
             irParaColecoes={() => setAba('colecoes')} />}
-          {aba === 'entidades' && catalogo && <Entidades catalogo={catalogo} atualizar={setCatalogo} />}
+          {aba === 'entidades' && catalogo && (usuario && usuario.papel !== 'admin' ?
+            <ul>{catalogo.tipos.map(t => <li key={t.codigo}>{t.codigo} · {t.nome}</li>)}</ul> :
+            <Entidades catalogo={catalogo} atualizar={setCatalogo} />)}
+          {aba === 'admin' && usuario?.papel === 'admin' && <Admin usuario={usuario} />}
         </>
       )}
     </Layout>

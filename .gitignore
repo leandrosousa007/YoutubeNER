@@ -1,4 +1,6 @@
 .env
+*.sqlite3
+*.dump
 /manual/
 __pycache__/
 *.pyc

@@ -1,7 +1,7 @@
 import { useState, type FormEvent } from 'react'
 import { Button } from '../../components/Button/Button'
 import { Icon } from '../../components/Icon/Icon'
-import { api, apiColecao, json, mensagem, requisicao, type Colecao, type Postgres } from '../../features/anotacao/api'
+import { api, apiColecao, json, mensagem, requisicao, type Colecao, type Postgres, type Usuario } from '../../features/anotacao/api'
 import s from './Pesquisa.module.css'
 
 type Props = {
@@ -10,17 +10,19 @@ type Props = {
   sincronizar: () => Promise<void>
   atualizarColecoes: () => Promise<void>
   abrir: (item: Colecao) => void
+  usuario: Usuario | null
 }
 type Coleta = { inseridos: number; ja_existiam: number; coletados: number; sincronizacao: Postgres }
 const numero = (n: number) => n.toLocaleString('pt-BR')
 
-export function Biblioteca({ colecoes, postgres, sincronizar, atualizarColecoes, abrir }: Props) {
+export function Biblioteca({ colecoes, postgres, sincronizar, atualizarColecoes, abrir, usuario }: Props) {
   const [video, setVideo] = useState('')
   const [operacao, setOperacao] = useState<'postgres' | 'csv' | 'sync' | null>(null)
   const [erro, setErro] = useState('')
   const [aviso, setAviso] = useState('')
   const espelho = colecoes.find(item => item.id === postgres?.colecao)
   const bancoDisponivel = postgres?.estado !== 'sem_configuracao'
+  const admin = !usuario || usuario.papel === 'admin'
   const total = colecoes.reduce((soma, item) => soma + item.total, 0)
   const revisados = colecoes.reduce((soma, item) => soma + item.revisados, 0)
 
@@ -37,7 +39,7 @@ export function Biblioteca({ colecoes, postgres, sincronizar, atualizarColecoes,
     evento.preventDefault()
     if (operacao) return
     const botao = (evento.nativeEvent as SubmitEvent).submitter
-    const acao = botao?.getAttribute('data-acao') === 'csv' ? 'csv' : 'postgres'
+    const acao = botao?.getAttribute('data-acao') === 'postgres' && admin ? 'postgres' : 'csv'
     if (acao === 'postgres' && !bancoDisponivel) return
     const videoId = video.trim()
     setOperacao(acao)
@@ -56,7 +58,7 @@ export function Biblioteca({ colecoes, postgres, sincronizar, atualizarColecoes,
         const url = URL.createObjectURL(await resposta.blob())
         const link = document.createElement('a')
         link.href = url
-        link.download = 'comentarios-' + videoId + '.csv'
+        link.download = 'comentarios-youtube.csv'
         document.body.appendChild(link)
         link.click()
         link.remove()
@@ -85,20 +87,20 @@ export function Biblioteca({ colecoes, postgres, sincronizar, atualizarColecoes,
           {postgres?.mensagem && <p className={postgres.estado === 'erro' ? s.alert : s.muted}>{postgres.mensagem}</p>}
           {postgres?.ultima_sync && <p className={s.muted}>Última leitura: {new Date(postgres.ultima_sync).toLocaleString('pt-BR')}</p>}
           <div className={s.actions}>
-            <Button variant="secondary" disabled={!!operacao || !bancoDisponivel || postgres?.estado === 'sincronizando'}
-              onClick={() => void atualizarBanco()}><Icon name="refresh" width="16" height="16" />{operacao === 'sync' || postgres?.estado === 'sincronizando' ? 'Sincronizando…' : 'Sincronizar agora'}</Button>
+            {admin && <Button variant="secondary" disabled={!!operacao || !bancoDisponivel || postgres?.estado === 'sincronizando'}
+              onClick={() => void atualizarBanco()}><Icon name="refresh" width="16" height="16" />{operacao === 'sync' || postgres?.estado === 'sincronizando' ? 'Sincronizando…' : 'Sincronizar agora'}</Button>}
           </div>
         </section>
         <form className={s.card} onSubmit={evento => void enviar(evento)}>
           <div className={s.cardHeader}><span className={s.cardIcon}><Icon name="play" /></span><div><p className={s.eyebrow}>Nova coleta</p><h2>Comentários do YouTube</h2></div></div>
-          <p>Informe o ID do vídeo e escolha onde guardar os comentários.</p>
-          <label htmlFor="video-id">ID do vídeo</label>
-          <input id="video-id" placeholder="Ex.: 8MK8fBxAHoU" required maxLength={11} pattern="[a-zA-Z0-9_\-]{11}"
+          <p>Informe o ID ou o link do vídeo.</p>
+          <label htmlFor="video-id">ID ou link do vídeo</label>
+          <input id="video-id" placeholder="Ex.: 8MK8fBxAHoU" required maxLength={512}
             value={video} disabled={!!operacao} onChange={evento => setVideo(evento.target.value)} />
           <div className={s.actions}>
-            <Button type="submit" data-acao="postgres" disabled={!!operacao || !bancoDisponivel}>
+            {admin && <Button type="submit" data-acao="postgres" disabled={!!operacao || !bancoDisponivel}>
               {operacao === 'postgres' ? 'Coletando…' : 'Adicionar ao PostgreSQL'}
-            </Button>
+            </Button>}
             <Button variant="secondary" type="submit" data-acao="csv" disabled={!!operacao}>
               <Icon name="download" width="16" height="16" />{operacao === 'csv' ? 'Preparando…' : 'Baixar CSV do vídeo'}
             </Button>
@@ -119,7 +121,7 @@ export function Biblioteca({ colecoes, postgres, sincronizar, atualizarColecoes,
                 <progress value={item.revisados} max={item.total || 1} aria-label={'Progresso de ' + item.nome} />
               </div>
               <div className={s.actions}>
-                <a href={apiColecao(item.id) + '/csv'}><Icon name="download" width="16" height="16" />Baixar CSV da coleção</a>
+                {usuario?.papel !== 'anotador' && <a href={apiColecao(item.id) + '/csv'}><Icon name="download" width="16" height="16" />Baixar CSV da coleção</a>}
                 <Button variant="secondary" onClick={() => abrir(item)}>Anotar</Button>
               </div>
             </li>

@@ -1,14 +1,19 @@
 import asyncio
 from contextlib import asynccontextmanager, suppress
 import re
+import os
+from urllib.parse import urlsplit, parse_qs
 
 import uvicorn
 import requests
 import psycopg
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from pydantic import BaseModel
+from .security import proteger, router as auth_router, limitar
+from .admin_api import router as admin_router
+from .pg_storage import enabled
 
 if __package__:
     from .comentarios import buscar_comentarios, ConfiguracaoYouTubeError
@@ -26,6 +31,9 @@ else:
 
 @asynccontextmanager
 async def lifespan(_app):
+    if os.getenv("YOUTUBENER_PRODUCTION") == "1" and (not enabled() or
+        len(os.getenv("YOUTUBENER_EDGE_SECRET", "")) < 32 or not os.getenv("YOUTUBENER_WEB_ORIGIN", "").startswith("https://")):
+        raise RuntimeError("Produção exige PostgreSQL, segredo de proxy e origem HTTPS.")
     iniciar_banco()
     tarefa = asyncio.create_task(sincronizacao_continua())
     try:
@@ -38,6 +46,9 @@ async def lifespan(_app):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(router)
+app.include_router(auth_router)
+app.include_router(admin_router)
+app.middleware("http")(proteger)
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,10 +65,13 @@ class VideoRequest(BaseModel):
     video_id: str
 
 @app.post("/comentarios")
-def buscar_snippets(video: VideoRequest):
+def coleta_local(video: VideoRequest):
+    return buscar_snippets(VideoRequest(video_id=validar_video(video)))
+
+def buscar_snippets(video: VideoRequest, limite=None):
     # busca os comentarios do video
     try:
-        comentarios = buscar_comentarios(video.video_id)
+        comentarios = buscar_comentarios(video.video_id, limite) if limite else buscar_comentarios(video.video_id)
     except ConfiguracaoYouTubeError as erro:
         raise HTTPException(status_code=503, detail=str(erro)) from erro
     except requests.exceptions.Timeout as erro:
@@ -86,15 +100,27 @@ def buscar_snippets(video: VideoRequest):
 
 def validar_video(video: VideoRequest):
     video_id = video.video_id.strip()
+    try:
+        uri = urlsplit(video_id)
+        if uri.scheme in ("http", "https") and not uri.username and not uri.password:
+            if uri.hostname == "youtu.be":
+                video_id = uri.path.strip("/")
+            elif uri.hostname in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+                video_id = parse_qs(uri.query).get("v", [""])[0] if uri.path == "/watch" else (
+                    uri.path.split("/")[-1] if uri.path.startswith(("/shorts/", "/live/")) else "")
+    except ValueError:
+        raise HTTPException(422, "URL de vídeo inválida.")
     if not re.fullmatch(r"[a-zA-Z0-9_-]{11}", video_id):
         raise HTTPException(422, "Informe o ID do vídeo do YouTube (11 caracteres).")
     return video_id
 
 
 @app.post("/api/coleta/csv")
-def coletar_csv(video: VideoRequest):
+def coletar_csv(video: VideoRequest, request: Request):
     video_id = validar_video(video)
-    comentarios = buscar_snippets(VideoRequest(video_id=video_id))["comentarios"]
+    if enabled():
+        limitar("csv", request.headers.get("x-ytn-client", "desconhecido"), 4, 30, 3600)
+    comentarios = buscar_snippets(VideoRequest(video_id=video_id), 5 if enabled() else None)["comentarios"]
     return Response(gerar_csv(comentarios), media_type="text/csv",
                     headers={"Content-Disposition": f'attachment; filename="comentarios-{video_id}.csv"'})
 

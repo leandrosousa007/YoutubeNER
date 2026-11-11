@@ -20,7 +20,7 @@ def pegar_chave():
     return chave
 
 
-def buscar_comentarios(video_id):
+def buscar_comentarios(video_id, limite_paginas=None):
     url = "https://www.googleapis.com/youtube/v3/commentThreads"
     params = {
         "part": "snippet",
@@ -33,10 +33,12 @@ def buscar_comentarios(video_id):
     lista_comentarios = []
 
     # busca uma pagina de cada vez
-    while True:
-        resposta = requests.get(url, params=params, timeout=30)
+    paginas = 0
+    while limite_paginas is None or paginas < limite_paginas:
+        resposta = requests.get(url, params=params, timeout=12 if limite_paginas else 30)
         resposta.raise_for_status()
         dados = resposta.json()
+        paginas += 1
 
         # guarda os dados de cada comentario
         for item in dados.get("items", []):

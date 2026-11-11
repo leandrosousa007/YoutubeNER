@@ -21,6 +21,9 @@ export type Comentario = {
   entidades: Entidade[]
   relacoes: Relacao[]
   rejeitadas: Marcacao[]
+  autor?: string | null
+  estado?: 'pendente' | 'rascunho' | 'enviado' | 'ajuste' | 'revisado'
+  feedback?: string
 }
 export type ComentarioResumo = Omit<Comentario, 'rejeitadas'>
 export type Pagina = { colecao: Colecao; comentarios: ComentarioResumo[] }
@@ -37,6 +40,7 @@ export type Postgres = {
 
 export type Tipo = { codigo: string; nome: string; cor: string; descricao: string }
 export type Catalogo = { tipos: Tipo[]; removidos: Tipo[] }
+export type Usuario = { login: string; papel: 'anotador' | 'revisor' | 'admin' }
 
 export const apiColecao = (id: string) => `/api/colecoes/${id}`
 export const chaveMarcacao = ({ inicio, fim, tipo }: Marcacao) => `${inicio}:${fim}:${tipo}`

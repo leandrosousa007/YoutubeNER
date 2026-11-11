@@ -4,7 +4,7 @@ import { Dialog } from '../../components/Dialog/Dialog'
 import { Icon } from '../../components/Icon/Icon'
 import {
   api, apiColecao, chaveMarcacao, json, mensagem, sobrepoe,
-  type Colecao, type Comentario, type ComentarioResumo, type Entidade, type ItemAnotacao, type Marcacao, type NovaRelacao, type Pagina, type Tipo,
+  type Colecao, type Comentario, type ComentarioResumo, type Entidade, type ItemAnotacao, type Marcacao, type NovaRelacao, type Pagina, type Tipo, type Usuario,
 } from '../../features/anotacao/api'
 import { GruposAnotacao } from './GruposAnotacao'
 import { Inspetor, type Trecho } from './Inspetor'
@@ -15,12 +15,13 @@ type Props = {
   colecao?: Colecao
   tipos: Tipo[]
   removidos: Tipo[]
+  usuario: Usuario | null
   selecionar: (id: string) => void
   atualizar: (item: Colecao) => void
   irParaColecoes: () => void
 }
 
-const TAMANHO = 10
+const TAMANHO = 20
 const MEDIA_COMPACTA = '(max-width: 55rem)'
 const numero = (n: number) => n.toLocaleString('pt-BR')
 
@@ -39,7 +40,7 @@ function lerTrecho(elemento: HTMLElement): Trecho | null {
   return { inicio, fim: inicio + Array.from(selecionado).length, texto: selecionado }
 }
 
-export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atualizar, irParaColecoes }: Props) {
+export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atualizar, irParaColecoes, usuario }: Props) {
   const [pos, setPos] = useState<number | null>(null)
   const [pagina, setPagina] = useState<Pagina | null>(null)
   const [detalhe, setDetalhe] = useState<Comentario | null>(null)
@@ -51,12 +52,22 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   const [erro, setErro] = useState('')
   const [aviso, setAviso] = useState('')
   const [atualizacao, setAtualizacao] = useState(0)
+  const [filaRevisao, setFilaRevisao] = useState(() => location.pathname === '/revisao' && Boolean(usuario && usuario.papel !== 'anotador'))
+  const [feedback, setFeedback] = useState('')
+  const [resultados, setResultados] = useState<{ itens: { id: string; pos: number; texto: string }[]; proximo: number | null } | null>(null)
+  const [filtros, setFiltros] = useState('')
+  const [conjunto, setConjunto] = useState('')
+  const [listaConjuntos, setListaConjuntos] = useState<{ pos: number; itens: { autor: string; estado: string }[] } | null>(null)
+  const [eventos, setEventos] = useState<{ator:string;acao:string;criado_em:string;conjunto?:string;anterior:{feedback?:string;versao:number;entidades:{tipo:string;texto:string}[]}}[] | null>(null)
   const [compacto, setCompacto] = useState(() => window.matchMedia(MEDIA_COMPACTA).matches)
   const [painel, setPainel] = useState<'grupos' | 'detalhes' | null>(null)
   const id = colecao?.id
   const total = colecao?.total ?? 0
   const inicio = pos === null ? null : Math.floor((pos - 1) / TAMANHO) * TAMANHO + 1
   const item = detalhe?.pos === pos ? detalhe : null
+  const opcoesConjuntos = listaConjuntos?.pos === pos ? listaConjuntos.itens : []
+  const podeConfirmar = !!item && !(usuario?.papel === 'anotador' &&
+    (item.revisado || item.estado === 'enviado' || (item.autor && item.autor !== usuario.login)))
   const porCodigo = new Map([...tipos, ...removidos].map(t => [t.codigo, t]))
   const sobreposta = trecho && item?.entidades.some(e => sobrepoe(e, trecho))
   const linhas = pagina?.comentarios[0]?.pos === inicio ? pagina.comentarios : []
@@ -65,11 +76,12 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     const selecao = lerTrecho(elemento)
     if (!selecao) return
     setPos(posicao)
+    if (posicao !== pos && conjunto !== usuario?.login) setConjunto('')
     setMarca(null)
     setTrecho(atual => atual?.inicio === selecao.inicio && atual.fim === selecao.fim && atual.texto === selecao.texto ? atual : selecao)
     setErro('')
     setAviso('')
-  }, [])
+  }, [pos, conjunto, usuario?.login])
 
   useEffect(() => {
     const media = window.matchMedia(MEDIA_COMPACTA)
@@ -92,11 +104,11 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   useEffect(() => {
     if (!id || !total || pos !== null) return
     const controller = new AbortController()
-    api<{ pos: number | null }>(apiColecao(id) + '/pendente', { signal: controller.signal })
+    api<{ pos: number | null }>(apiColecao(id) + '/proximo?revisao=' + filaRevisao, { method: 'POST', signal: controller.signal })
       .then(dados => { if (!controller.signal.aborted) setPos(dados.pos ?? 1) })
       .catch(erro => { if (!controller.signal.aborted) setErro(mensagem(erro)) })
     return () => controller.abort()
-  }, [id, total, pos, atualizacao])
+  }, [id, total, pos, atualizacao, filaRevisao])
 
   useEffect(() => {
     if (!id || inicio === null) return
@@ -110,11 +122,19 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   useEffect(() => {
     if (!id || pos === null) return
     const controller = new AbortController()
-    api<Comentario>(apiColecao(id) + '/comentarios/' + pos, { signal: controller.signal })
+    api<Comentario>(apiColecao(id) + '/comentarios/' + pos + '?conjunto=' + encodeURIComponent(conjunto), { signal: controller.signal })
       .then(dados => { if (!controller.signal.aborted) setDetalhe(dados) })
       .catch(erro => { if (!controller.signal.aborted) setErro(mensagem(erro)) })
     return () => controller.abort()
-  }, [id, pos, atualizacao])
+  }, [id, pos, atualizacao, conjunto])
+
+  useEffect(() => {
+    if (!id || !usuario || pos === null) return
+    const ac = new AbortController()
+    api<{ autor: string; estado: string }[]>(apiColecao(id) + '/comentarios/' + pos + '/conjuntos', { signal: ac.signal })
+      .then(itens => { if (!ac.signal.aborted) setListaConjuntos({ pos, itens }) }).catch(() => {})
+    return () => ac.abort()
+  }, [id, pos, usuario, revisaoGrupos])
 
   useEffect(() => {
     if (marca?.id) document.getElementById('span-' + marca.id)?.scrollIntoView({ block: 'nearest' })
@@ -129,6 +149,9 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   function ir(pagina: number) {
     if (ocupado || pagina < 1 || pagina > total) return
     limparSelecao()
+    setConjunto('')
+    setEventos(null)
+    setFeedback('')
     setPos(pagina)
     setErro('')
     setAviso('')
@@ -136,6 +159,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
 
   function receber(dados: { comentario: Comentario; colecao: Colecao }) {
     if (dados.comentario.pos === pos) setDetalhe(dados.comentario)
+    if (conjunto) { setRevisaoGrupos(n => n+1); return }
     setPagina(anterior => anterior ? { ...anterior,
       comentarios: anterior.comentarios.map(linha => linha.pos === dados.comentario.pos ? dados.comentario : linha),
     } : anterior)
@@ -143,20 +167,31 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     setRevisaoGrupos(n => n + 1)
   }
 
-  async function salvar(entidades: Marcacao[], revisado: boolean, rejeitadas: Marcacao[], aviso: string, manter?: Marcacao, relacoes?: NovaRelacao[]) {
+  async function salvar(entidades: Marcacao[], revisado: boolean, rejeitadas: Marcacao[], aviso: string, manter?: Marcacao, relacoes?: NovaRelacao[], avancar = false, ajuste?: string) {
     if (!item || !id || ocupado) return
     setOcupado(true)
     setErro('')
     setAviso('')
     try {
       const dados = await api<{ comentario: Comentario; colecao: Colecao }>(
-        apiColecao(id) + '/comentarios/' + item.pos,
-        json('PUT', { versao: item.versao, entidades, revisado, rejeitadas, relacoes }),
+        apiColecao(id) + '/comentarios/' + item.pos + '?conjunto=' + encodeURIComponent(conjunto),
+        json('PUT', { versao: item.versao, entidades, revisado, rejeitadas, relacoes, ajuste }),
       )
       receber(dados)
       limparSelecao()
       if (manter) setMarca(dados.comentario.entidades.find(e => chaveMarcacao(e) === chaveMarcacao(manter)) ?? null)
       setAviso(aviso)
+      if (avancar && (!conjunto || usuario?.papel !== 'anotador')) {
+        try {
+          if (conjunto) {
+            if (!await abrirProximoConjunto()) setAviso(aviso + ' A fila está vazia.')
+          } else {
+            const proximo = await api<{ pos: number | null }>(apiColecao(id) + '/proximo?depois=' + item.pos + '&revisao=' + filaRevisao, { method: 'POST' })
+            if (proximo.pos !== null) { setEventos(null); setFeedback(''); setPos(proximo.pos) }
+            else setAviso(aviso + ' A fila está vazia.')
+          }
+        } catch { setAviso(aviso + ' Não foi possível abrir o próximo. Use o botão da fila para tentar de novo.') }
+      }
     } catch (erro) { setErro(mensagem(erro)) }
     finally { setOcupado(false) }
   }
@@ -175,6 +210,10 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
 
   async function excluir(posicao: number, span: string) {
     if (!id || ocupado) return
+    if (conjunto && item) {
+      await salvar(item.entidades.filter(e => e.id !== span), false, item.rejeitadas, 'Marcação excluída.')
+      return
+    }
     setOcupado(true)
     setErro('')
     setAviso('')
@@ -198,14 +237,57 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     } catch (erro) { setErro(mensagem(erro)) }
   }
 
-  async function pendente() {
+  async function pendente(revisao = filaRevisao) {
     if (!id || ocupado) return
     try {
-      const dados = await api<{ pos: number | null }>(apiColecao(id) + '/pendente?depois=' + (pos ?? 0))
-      if (dados.pos === null) setAviso('Todos os comentários foram revisados.')
+      const dados = await api<{ pos: number | null }>(apiColecao(id) + '/proximo?depois=' + (pos ?? 0) + '&revisao=' + revisao, { method: 'POST' })
+      if (dados.pos === null) setAviso('Não há comentários disponíveis nesta fila.')
       else ir(dados.pos)
     } catch (erro) { setErro(mensagem(erro)) }
   }
+
+  async function abrirProximoConjunto() {
+    if (!id) return false
+    const proximo = await api<{ pos: number; autor: string } | null>(apiColecao(id) + '/proximo-conjunto')
+    if (!proximo) return false
+    limparSelecao()
+    setDetalhe(null)
+    setEventos(null)
+    setFeedback('')
+    setConjunto(proximo.autor)
+    setPos(proximo.pos)
+    setAtualizacao(n => n + 1)
+    return true
+  }
+
+  function confirmar() {
+    if (!item || ocupado || !podeConfirmar) return
+    if (trecho && !marca) {
+      setErro('Escolha um rótulo para o trecho selecionado ou limpe a seleção antes de confirmar.')
+      return
+    }
+    void salvar(item.entidades, !item.revisado, item.rejeitadas, item.revisado ? 'Comentário reaberto.' :
+      usuario?.papel === 'anotador' ? 'Enviado para revisão.' : 'Revisão confirmada.', undefined, undefined, !item.revisado)
+  }
+
+  async function filtrar(query: string, depois = 0) {
+    if (!id) return
+    setErro('')
+    try { setResultados(await api<NonNullable<typeof resultados>>(apiColecao(id) + '/busca?' + query + '&depois=' + depois)) }
+    catch (e) { setErro(mensagem(e)) }
+  }
+
+  useEffect(() => {
+    function atalho(e: KeyboardEvent) {
+      if (e.key === 'Enter' && e.ctrlKey && !e.metaKey && !e.repeat && podeConfirmar && !ocupado &&
+          !(e.target instanceof HTMLTextAreaElement) && !painel && !item?.revisado) {
+        e.preventDefault()
+        confirmar()
+      }
+    }
+    window.addEventListener('keydown', atalho)
+    return () => window.removeEventListener('keydown', atalho)
+  })
 
   function localizarMarca(entidade: ItemAnotacao) {
     ir(entidade.pos)
@@ -228,7 +310,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     aplicarTipo={aplicarTipo} excluir={span => { if (item) void excluir(item.pos, span) }}
     limpar={limparSelecao} escolher={e => { limparSelecao(); setMarca(e) }}
     salvarRelacoes={relacoes => item ? salvar(item.entidades, false, item.rejeitadas, 'Relações salvas.', undefined, relacoes) : Promise.resolve()}
-    revisar={() => { if (item) void salvar(item.entidades, !item.revisado, item.rejeitadas, item.revisado ? 'Comentário reaberto.' : 'Revisão salva.') }} />
+    revisar={confirmar} />
 
   return (
     <div className={s.workbench}>
@@ -248,17 +330,17 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
           <progress value={colecao.revisados} max={total || 1} aria-label="Progresso da revisão" />
           <small>{numero(faltam)} pendentes</small>
         </div>
-        <div className={s.exportActions}>
+        {usuario?.papel !== 'anotador' && <div className={s.exportActions}>
           <a href={apiColecao(colecao.id) + '/anotacoes.jsonl'}><Icon name="download" width="16" height="16" /> Exportar JSONL</a>
           <a href={apiColecao(colecao.id) + '/anotacoes.csv'}><Icon name="download" width="16" height="16" /> Exportar CSV</a>
-        </div>
-        <details className={s.exportMenu}>
+        </div>}
+        {usuario?.papel !== 'anotador' && <details className={s.exportMenu}>
           <summary><Icon name="download" width="16" height="16" /> Exportar</summary>
           <div>
             <a href={apiColecao(colecao.id) + '/anotacoes.jsonl'}>Anotações em JSONL</a>
             <a href={apiColecao(colecao.id) + '/anotacoes.csv'}>Anotações em CSV</a>
           </div>
-        </details>
+        </details>}
       </header>
 
       {(erro || (!compacto && aviso)) && <div className={erro ? s.error : s.notice} role={erro ? 'alert' : 'status'}>
@@ -267,7 +349,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
       </div>}
 
       <div className={s.columns}>
-        {!compacto && grupos}
+        {!compacto && (conjunto ? <aside className={s.layers}><h2>Anotação independente</h2><p className={s.help}>As marcações deste conjunto não alteram a anotação principal.</p></aside> : grupos)}
 
         <section className={s.document} aria-label="Comentários da coleção">
           <div className={s.docHeader}>
@@ -282,8 +364,73 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
               <input aria-label="Buscar ID do comentário" placeholder="Buscar ID" value={busca} onChange={e => setBusca(e.target.value)} />
               <button type="submit" disabled={!busca.trim() || ocupado}>Ir ao ID</button>
             </form>
-            <button type="button" disabled={!faltam || ocupado} onClick={() => void pendente()}>Próximo pendente</button>
+            <button type="button" disabled={!faltam || ocupado} onClick={() => void pendente()}>{filaRevisao ? 'Próximo para aprovar' : 'Próximo pendente'}</button>
+            {usuario && usuario.papel !== 'anotador' && <button type="button" aria-pressed={filaRevisao} disabled={ocupado}
+              onClick={() => { setFilaRevisao(!filaRevisao); void pendente(!filaRevisao) }}>{filaRevisao ? 'Voltar à anotação' : 'Fila de revisão'}</button>}
+            {usuario && usuario.papel !== 'anotador' && <button type="button" disabled={ocupado} onClick={() => {
+              setErro('')
+              void abrirProximoConjunto().then(abriu => setAviso(abriu ? '' : 'Nenhum conjunto independente aguardando revisão.')).catch(e => setErro(mensagem(e)))
+            }}>Revisar conjuntos</button>}
           </div>
+          <details className={s.docHeader}>
+            <summary>Buscar e filtrar no acervo</summary>
+            <form className={s.group} onSubmit={e => {
+              e.preventDefault()
+              const query = new URLSearchParams()
+              new FormData(e.currentTarget).forEach((v, k) => { if (String(v).trim()) query.set(k, String(v).trim()) })
+              setFiltros(query.toString()); void filtrar(query.toString())
+            }}>
+              <input name="texto" aria-label="Texto do comentário" placeholder="Texto" maxLength={200} />
+              <select name="tipo" aria-label="Filtrar por rótulo"><option value="">Todos os rótulos</option>{tipos.map(t => <option key={t.codigo}>{t.codigo}</option>)}</select>
+              {usuario && <><input name="autor" aria-label="Anotador" placeholder="Login do anotador" maxLength={100} />
+                <input name="video" aria-label="ID do vídeo" placeholder="ID do vídeo" maxLength={11} />
+                <label>De <input type="date" name="de" aria-label="Data inicial" /></label>
+                <label>Até <input type="date" name="ate" aria-label="Data final" /></label>
+                <select name="estado" aria-label="Etapa da anotação"><option value="">Todas as etapas</option>
+                  <option value="pendente">Pendente</option><option value="rascunho">Em andamento</option>
+                  <option value="enviado">Aguardando revisão</option><option value="ajuste">Precisa de ajuste</option><option value="revisado">Revisado</option></select></>}
+              <Button type="submit" variant="secondary">Buscar</Button>
+            </form>
+            {usuario && usuario.papel !== 'anotador' && <div className={s.group}>
+              <a href={apiColecao(colecao.id) + '/exportar?formato=jsonl&' + filtros}>Exportar JSONL com estes filtros</a>
+              <a href={apiColecao(colecao.id) + '/exportar?formato=csv&' + filtros}>Exportar CSV com estes filtros</a>
+            </div>}
+            {resultados && <div><p>{resultados.itens.length ? 'Selecione um resultado para abrir o comentário.' : 'Nenhum resultado.'}</p>
+              <ul>{resultados.itens.map(r => <li key={r.pos}><button type="button" disabled={ocupado} onClick={() => ir(r.pos)}>{r.id} · {r.texto.slice(0, 130)}</button></li>)}</ul>
+              {resultados.proximo !== null && <Button variant="secondary" onClick={() => void filtrar(filtros, resultados.proximo!)}>Mais resultados</Button>}</div>}
+          </details>
+          {usuario && pos !== null && <div className={s.docHeader}>
+            <label htmlFor="conjunto">Conjunto de anotações</label>
+            <select id="conjunto" value={conjunto} disabled={ocupado} onChange={e => {
+              setDetalhe(null); limparSelecao(); setConjunto(e.target.value); setEventos(null); setAviso('')
+            }}>
+              <option value="">Principal</option><option value={usuario.login}>Minha anotação independente</option>
+              {opcoesConjuntos.filter(o => o.autor !== usuario.login).map(o => <option key={o.autor} value={o.autor}>{o.autor} · {o.estado}</option>)}
+            </select>
+            {usuario.papel !== 'anotador' && <Button variant="secondary" onClick={() => {
+              if (eventos) return setEventos(null)
+              void api<NonNullable<typeof eventos>>(apiColecao(colecao.id) + '/comentarios/' + pos + '/historico')
+                .then(setEventos).catch(e => setErro(mensagem(e)))
+            }}>{eventos ? 'Fechar histórico' : 'Histórico'}</Button>}
+            {eventos && <ul>{eventos.filter(e => (e.conjunto || '') === conjunto).map((e,i) => <li key={i}>
+              {e.ator} · {e.acao} · v{e.anterior.versao} · {new Date(e.criado_em).toLocaleString('pt-BR')}
+              {e.anterior.feedback && <p>{e.anterior.feedback}</p>}
+              {e.anterior.entidades?.length > 0 && <p>{e.anterior.entidades.map(a => a.tipo + ': ' + a.texto).join(' · ')}</p>}
+            </li>)}</ul>}
+          </div>}
+          {item && <div className={s.docHeader}>
+            <Button disabled={ocupado || !podeConfirmar}
+              onClick={confirmar}>{ocupado ? 'Salvando…' : item.revisado ? 'Reabrir revisão' :
+                usuario?.papel === 'anotador' ? (conjunto ? 'Enviar conjunto' : 'Enviar e avançar') : 'Confirmar e avançar'}</Button>
+            <span className={s.help}>{item.autor ? 'Anotação de ' + item.autor + ' · ' : ''}{item.estado === 'enviado' ? 'Aguardando revisão' : item.feedback || (aviso ? aviso : 'Ctrl + Enter para confirmar')}</span>
+            {item.estado === 'enviado' && usuario && usuario.papel !== 'anotador' && <>
+              <input aria-label="Ajuste solicitado" placeholder="Descreva o ajuste" maxLength={1000} value={feedback} onChange={e => setFeedback(e.target.value)} />
+              <Button variant="secondary" disabled={ocupado || !feedback.trim()} onClick={() => {
+                void salvar(item.entidades, false, item.rejeitadas, 'Ajuste solicitado.', undefined, undefined, true, feedback.trim())
+                setFeedback('')
+              }}>Pedir ajuste</Button>
+            </>}
+          </div>}
           {total === 0 ? <p className={s.help}>Nenhum comentário com texto nesta coleção.</p> : linhas.length === 0 ? <p className={s.help} role="status">Abrindo comentários…</p> : (
             <ol className={s.rows} start={inicio ?? 1}>
               {linhas.map(linha => {
@@ -298,7 +445,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
                     <p tabIndex={0} aria-label={'Texto do comentário ' + linha.id} data-comentario-pos={linha.pos}
                       onPointerUp={e => { if (!ocupado) capturar(e.currentTarget, linha.pos) }}
                       onKeyUp={e => { if (!ocupado) capturar(e.currentTarget, linha.pos) }}>
-                      <TextoMarcado texto={linha.texto} entidades={atual.entidades} porCodigo={porCodigo}
+                      <TextoMarcado texto={linha.texto} entidades={conjunto && item?.pos !== linha.pos ? [] : atual.entidades} porCodigo={porCodigo}
                         escolher={e => escolherMarca(e, linha)} selecionada={pos === linha.pos ? marca : null} />
                     </p>
                   </div>
@@ -322,7 +469,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
         </div>}
         {!marca && !trecho && aviso && <div className={s.dockStatus} role="status">{aviso}</div>}
         <div className={s.dockActions}>
-          <Button variant="secondary" onClick={() => setPainel('grupos')}><Icon name="list" width="17" height="17" /> Marcações</Button>
+          {!conjunto && <Button variant="secondary" onClick={() => setPainel('grupos')}><Icon name="list" width="17" height="17" /> Marcações</Button>}
           <Button variant="secondary" aria-label="Detalhes do trecho" disabled={!item} onClick={() => setPainel('detalhes')}><Icon name="more" width="17" height="17" /> Detalhes</Button>
         </div>
       </div>}

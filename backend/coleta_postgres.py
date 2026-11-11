@@ -38,7 +38,8 @@ def gravar_coleta(video_id, comentarios):
         con.execute("SET LOCAL statement_timeout = '90s'")
         # Serializa a alocação de IDs e o vínculo com comentários históricos.
         con.execute("LOCK TABLE dataset.comentario IN SHARE ROW EXCLUSIVE MODE")
-        con.execute("""
+        if not con.execute("SELECT to_regclass('dataset.youtubener_origem')").fetchone()[0]:
+            con.execute("""
             CREATE TABLE IF NOT EXISTS dataset.youtubener_origem (
                 youtube_comment_id text PRIMARY KEY,
                 video_id text NOT NULL,

@@ -7,6 +7,7 @@ import unicodedata
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
+from .pg_storage import banco_pg, enabled, iniciar_pg
 
 
 PASTA = Path(os.environ.get("YOUTUBENER_DATA_DIR") or Path(__file__).resolve().parents[1] / "comentarios" / "colecoes")
@@ -34,6 +35,10 @@ TIPOS_INICIAIS = (
 
 @contextmanager
 def banco():
+    if enabled():
+        with banco_pg() as db:
+            yield db
+        return
     PASTA.mkdir(parents=True, exist_ok=True)
     db = sqlite3.connect(PASTA / "anotacoes.sqlite3")
     db.row_factory = sqlite3.Row
@@ -46,6 +51,9 @@ def banco():
 
 
 def iniciar_banco():
+    if enabled():
+        iniciar_pg(TIPOS_INICIAIS)
+        return
     with banco() as db:
         db.execute("PRAGMA journal_mode = WAL")
         db.executescript("""

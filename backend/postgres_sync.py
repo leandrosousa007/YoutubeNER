@@ -99,6 +99,10 @@ def sincronizar_postgres():
                 identidade = [con.info.host, con.info.port, con.info.dbname, schema, tabela, id_, texto]
                 colecao = hashlib.sha256(json.dumps(identidade).encode()).hexdigest()[:32]
                 with banco() as db:
+                    anterior = db.execute("SELECT id FROM colecoes WHERE origem = 'postgres' AND nome = ?",
+                                          (f"PostgreSQL · {schema}.{tabela}",)).fetchall()
+                    if len(anterior) == 1:
+                        colecao = anterior[0]["id"]
                     conhecidos = {r[0] for r in db.execute("SELECT id_origem FROM comentarios WHERE colecao = ?", (colecao,))}
                 campo_id = sql.Identifier(id_)
                 tabela_sql = sql.Identifier(schema, tabela)

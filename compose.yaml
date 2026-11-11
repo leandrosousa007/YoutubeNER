@@ -1,0 +1,47 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}
+    volumes: [pgdata:/var/lib/postgresql]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+    restart: unless-stopped
+  api:
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
+    environment:
+      YOUTUBENER_PRODUCTION: "1"
+      YOUTUBENER_WEB_ORIGIN: ${YOUTUBENER_WEB_ORIGIN:?defina YOUTUBENER_WEB_ORIGIN}
+      YOUTUBENER_EDGE_SECRET: ${YOUTUBENER_EDGE_SECRET:?defina YOUTUBENER_EDGE_SECRET}
+      YOUTUBENER_APP_DSN: ${YOUTUBENER_APP_DSN:?defina YOUTUBENER_APP_DSN}
+      YOUTUBENER_PG_DSN: ${YOUTUBENER_PG_DSN:?defina YOUTUBENER_PG_DSN}
+      YOUTUBENER_PG_SCHEMA: ${YOUTUBENER_PG_SCHEMA:-dataset}
+      YOUTUBENER_PG_TABLE: ${YOUTUBENER_PG_TABLE:-comentario}
+      YOUTUBENER_DATA_DIR: /data
+      YOUTUBE_API_KEY: ${YOUTUBE_API_KEY:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes: [appdata:/data]
+    restart: unless-stopped
+  https:
+    image: caddy:2
+    environment:
+      API_HOST: ${API_HOST:?defina API_HOST}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+    ports: ["80:80", "443:443"]
+    depends_on: [api]
+    restart: unless-stopped
+volumes:
+  pgdata:
+  appdata:
+  caddydata:
