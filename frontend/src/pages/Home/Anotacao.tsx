@@ -60,7 +60,8 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   const fila = useRef<Promise<void>>(Promise.resolve())
   const pendencias = useRef(0)
   const versaoConfirmada = useRef<number | null>(null)
-  const rolarAte = useRef<number | null>(null)
+  const [destino, setDestino] = useState<{ pos: number } | null>(null)
+  const ultimoDestino = useRef(destino)
   const falhaGravacao = useRef(false)
   const [salvando, setSalvando] = useState(false)
   const [detalhe, setDetalhe] = useState<Comentario | null>(null)
@@ -89,8 +90,11 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   const versaoConjunto = conjunto ? detalhe?.versao : undefined
   const opcoesConjuntos = listaConjuntos?.pos === pos ? listaConjuntos.itens : []
   const restricao = motivoSomenteLeitura(item, usuario)
-  const podeConfirmar = !!item && !restricao && !falhaGravacao.current
-  const edicaoBloqueada = ocupado || !!restricao || falhaGravacao.current
+  const pedidoReserva = useMemo(() => ({ id, pos, conjunto, atualizacao }), [id, pos, conjunto, atualizacao])
+  const [reservaVerificada, setReservaVerificada] = useState<typeof pedidoReserva | null>(null)
+  const verificando = usuario?.papel === 'anotador' && !conjunto && reservaVerificada !== pedidoReserva
+  const podeConfirmar = !verificando && !!item && !restricao && !falhaGravacao.current
+  const edicaoBloqueada = verificando || ocupado || !!restricao || falhaGravacao.current
   const porCodigo = useMemo(() => new Map([...tipos, ...removidos].map(t => [t.codigo, t])), [tipos, removidos])
   const sobreposta = trecho && item?.entidades.some(e => sobrepoe(e, trecho))
   const inicioCarregado = pagina?.comentarios[0]?.pos
@@ -131,7 +135,11 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     if (!id || !total || pos !== null) return
     const controller = new AbortController()
     api<{ pos: number | null }>(apiColecao(id) + '/proximo?revisao=' + filaRevisao, { method: 'POST', signal: controller.signal })
-      .then(dados => { if (!controller.signal.aborted) setPos(dados.pos ?? 1) })
+      .then(dados => {
+        if (controller.signal.aborted) return
+        setDestino({ pos: dados.pos ?? 1 })
+        setPos(dados.pos ?? 1)
+      })
       .catch(erro => { if (!controller.signal.aborted) setErro(mensagem(erro)) })
     return () => controller.abort()
   }, [id, total, pos, atualizacao, filaRevisao])
@@ -193,13 +201,26 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   }, [id, pos, usuario, versaoConjunto])
 
   useEffect(() => {
-    if (rolarAte.current === pos && pos !== null && linhas.length) {
-      const texto = document.querySelector<HTMLElement>(`[data-comentario-pos="${pos}"]`)
-      texto?.focus({ preventScroll: true })
-      texto?.scrollIntoView({ block: 'nearest' })
-      rolarAte.current = null
-    }
-  }, [pos, linhas.length])
+    if (!destino || ultimoDestino.current === destino || destino.pos !== pos || !linhas.length) return
+    const texto = document.querySelector<HTMLElement>(`[data-comentario-pos="${pos}"]`)
+    if (!texto) return
+    texto.focus({ preventScroll: true })
+    texto.scrollIntoView({ block: 'center', behavior: 'instant' })
+    ultimoDestino.current = destino
+  }, [destino, pos, linhas.length])
+
+  useEffect(() => {
+    if (!id || pos === null || conjunto || usuario?.papel !== 'anotador') return
+    const controller = new AbortController()
+    api<Comentario>(apiColecao(id) + '/comentarios/' + pos + '/reserva', { method: 'POST', signal: controller.signal })
+      .then(comentario => {
+        if (controller.signal.aborted) return
+        cache.update(comentario)
+        setPagina(p => p ? { ...p, comentarios: p.comentarios.map(c => c.pos === pos ? comentario : c) } : p)
+        setReservaVerificada(pedidoReserva)
+      }).catch(e => { if (!controller.signal.aborted) setErro(mensagem(e)) })
+    return () => controller.abort()
+  }, [cache, id, pos, conjunto, usuario?.papel, pedidoReserva])
 
   useEffect(() => {
     if (marca?.id) document.getElementById('span-' + marca.id)?.scrollIntoView({ block: 'nearest' })
@@ -231,6 +252,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     const pronta = cache.peek(inicioDaPagina(pagina))
     if (pronta) setPagina(pronta)
     setDetalhe(null)
+    setDestino({ pos: pagina })
     setPos(pagina)
     setErro('')
     setAviso('')
@@ -268,7 +290,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
       setFeedback('')
       const pronta = cache.peek(inicioDaPagina(proximo.pos))
       if (pronta) setPagina(pronta)
-      rolarAte.current = proximo.pos
+      setDestino({ pos: proximo.pos })
       setPos(proximo.pos)
     } catch { setAviso(aviso + ' Use o botão da fila para abrir o próximo.') }
   }
@@ -369,11 +391,13 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
 
   async function pendente(revisao = filaRevisao) {
     if (!id || navegacaoOcupada) return
+    setOcupado(true)
     try {
       const dados = await api<{ pos: number | null }>(apiColecao(id) + '/proximo?depois=' + (pos ?? 0) + '&revisao=' + revisao, { method: 'POST' })
       if (dados.pos === null) setAviso('Não há comentários disponíveis nesta fila.')
       else ir(dados.pos)
     } catch (erro) { setErro(mensagem(erro)) }
+    finally { setOcupado(false) }
   }
 
   async function abrirProximoConjunto() {
@@ -384,7 +408,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     setDetalhe(null)
     setEventos(null)
     setFeedback('')
-    rolarAte.current = proximo.pos
+    setDestino({ pos: proximo.pos })
     setConjunto(proximo.autor)
     setPos(proximo.pos)
     setAtualizacao(n => n + 1)
@@ -573,7 +597,10 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
                     {numero(linha.pos)}<span aria-label={atual.revisado ? 'Revisado' : 'Pendente'}>{atual.revisado ? '✓' : '·'}</span>
                   </button>
                   <div className={s.rowContent}>
-                    <span className={s.rowId}>ID {linha.id}</span>
+                    <span className={s.rowId}>ID {linha.id}
+                      {atual.autor && ['rascunho', 'ajuste'].includes(atual.estado ?? '') &&
+                        <strong> · {atual.autor === usuario?.login ? 'Reservado para você' : 'Reservado para ' + atual.autor}</strong>}
+                    </span>
                     <p tabIndex={0} aria-label={'Texto do comentário ' + linha.id} data-comentario-pos={linha.pos}
                       onPointerUp={e => { if (!ocupado) capturar(e.currentTarget, linha.pos) }}
                       onKeyUp={e => { if (!ocupado) capturar(e.currentTarget, linha.pos) }}>

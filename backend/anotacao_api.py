@@ -117,12 +117,7 @@ def proximo(colecao, depois, revisao):
             if item is None and depois:
                 item = db.execute(consulta,(colecao,0,pessoa["login"])).fetchone()
             if item:
-                db.execute("""DELETE FROM tarefas WHERE colecao=? AND autor=? AND pos<>? AND estado='rascunho'
-                    AND NOT EXISTS(SELECT 1 FROM anotacoes a WHERE a.colecao=tarefas.colecao AND a.pos=tarefas.pos AND a.versao>0)""",
-                    (colecao,pessoa["login"],item["pos"]))
-                db.execute("""INSERT INTO tarefas VALUES (?,?,?,'rascunho',datetime('now','+30 minutes'))
-                    ON CONFLICT(colecao,pos) DO UPDATE SET autor=excluded.autor,expira=excluded.expira""",
-                    (colecao,item["pos"],pessoa["login"]))
+                atribuir_reserva(db, colecao, item["pos"], pessoa["login"])
             return {"pos": item["pos"] if item else None}
         item = db.execute("SELECT pos FROM comentarios WHERE colecao = ? AND revisado = 0 AND pos > ? ORDER BY pos LIMIT 1",
                           (colecao, depois)).fetchone()
@@ -130,6 +125,34 @@ def proximo(colecao, depois, revisao):
             item = db.execute("SELECT pos FROM comentarios WHERE colecao = ? AND revisado = 0 ORDER BY pos LIMIT 1",
                               (colecao,)).fetchone()
         return {"pos": item["pos"] if item else None}
+
+
+def atribuir_reserva(db, colecao, pos, login):
+    db.execute("""DELETE FROM tarefas WHERE colecao=? AND autor=? AND pos<>? AND estado='rascunho'
+        AND NOT EXISTS(SELECT 1 FROM anotacoes a WHERE a.colecao=tarefas.colecao AND a.pos=tarefas.pos AND a.versao>0)""",
+        (colecao,login,pos))
+    db.execute("""INSERT INTO tarefas VALUES (?,?,?,'rascunho',datetime('now','+30 minutes'))
+        ON CONFLICT(colecao,pos) DO UPDATE SET autor=excluded.autor,expira=excluded.expira""",
+        (colecao,pos,login))
+
+
+@router.post("/colecoes/{colecao}/comentarios/{pos}/reserva")
+def reservar_selecionado(colecao: ColecaoId, pos: int):
+    pessoa = usuario.get()
+    if not pessoa or pessoa["papel"] != "anotador":
+        raise HTTPException(403)
+    with banco() as db:
+        db.execute("BEGIN IMMEDIATE")
+        atual = obter_comentario(db, colecao, pos)
+        if atual["revisado"] or atual["estado"] == "enviado":
+            return atual
+        if atual["autor"] not in (None, pessoa["login"]):
+            expirada = db.execute("""SELECT 1 FROM tarefas WHERE colecao=? AND pos=?
+                AND estado='rascunho' AND expira<CURRENT_TIMESTAMP""", (colecao, pos)).fetchone()
+            if atual["versao"] or not expirada:
+                return atual
+        atribuir_reserva(db, colecao, pos, pessoa["login"])
+        return obter_comentario(db, colecao, pos)
 
 
 def consultar_comentarios(db, colecao, inicio, tamanho):

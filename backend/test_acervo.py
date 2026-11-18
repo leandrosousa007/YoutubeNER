@@ -9,6 +9,7 @@ import time
 import unittest
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from pathlib import Path
 from uuid import uuid4
 
@@ -107,6 +108,37 @@ class AcervoTest(unittest.TestCase):
         self.assertEqual(reviewed.status_code,200,reviewed.text)
         self.assertTrue(reviewed.json()["comentario"]["revisado"])
         self.assertIsInstance(self.admin.get(f"{self.prefix}/comentarios/{a}/historico").json()[0]["anterior"],dict)
+
+    def test_anotadores_simultaneos(self):
+        barreira = Barrier(2)
+        def anotar(login):
+            cliente = self.clients[login]
+            barreira.wait(5)
+            pos = cliente.post(self.prefix + "/proximo?depois=41000").json()["pos"]
+            url = f"{self.prefix}/comentarios/{pos}"
+            comentario = cliente.post(url + "/reserva").json()
+            self.assertEqual(comentario["autor"], login)
+            body = self.payload(comentario)
+            body["entidades"] = [dict(id=uuid4().hex, inicio=0, fim=1, tipo="PERSON")]
+            barreira.wait(5)
+            resposta = cliente.put(url, json=body)
+            self.assertEqual(resposta.status_code, 200, resposta.text)
+            return pos, body["entidades"][0]["id"]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            a,b = pool.map(anotar, ["testana", "testbia"])
+        self.assertNotEqual(a[0], b[0])
+        for pos, span in (a,b):
+            self.assertEqual(self.get_comment(pos)["entidades"][0]["id"], span)
+        url = f"{self.prefix}/comentarios/42000"
+        def selecionar(login):
+            barreira.wait(5)
+            return self.clients[login].post(url + "/reserva").json()["autor"]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            donos = list(pool.map(selecionar, ["testana", "testbia"]))
+        self.assertEqual(donos[0], donos[1])
+        self.assertIn(donos[0], ["testana", "testbia"])
+        outro = "testbia" if donos[0] == "testana" else "testana"
+        self.assertEqual(self.clients[outro].put(url,json=self.payload(self.get_comment(42000))).status_code,403)
 
     def test_same_version_conflict_and_unicode(self):
         from .corpus import banco
