@@ -58,7 +58,7 @@ export function Admin({ usuario }: { usuario: Usuario }) {
       const url = URL.createObjectURL(await resposta.blob())
       const link = document.createElement('a')
       link.href = url
-      link.download = resposta.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] ?? 'youtubener.dump'
+      link.download = resposta.headers.get('Content-Disposition')?.match(/filename="([^"]+)"/)?.[1] ?? 'youtubener-anotacoes.sqlite3'
       link.click()
       window.setTimeout(() => URL.revokeObjectURL(url), 1000)
       return 'Download do backup iniciado.'
@@ -85,7 +85,7 @@ export function Admin({ usuario }: { usuario: Usuario }) {
       </form>
       <section className={s.card} aria-labelledby="titulo-backup">
         <h2 id="titulo-backup">Backup do projeto</h2>
-        <p>Inclui comentários sincronizados, anotações, progresso e contas. Guarde o arquivo em um local privado.</p>
+        <p>Inclui anotações, progresso, histórico e contas. Guarde também uma cópia do acervo fixo em um local privado.</p>
         <Button variant="secondary" onClick={baixar} disabled={ocupado}><Icon name="download" /> Baixar backup</Button>
       </section>
     </div>

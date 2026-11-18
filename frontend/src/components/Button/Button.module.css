@@ -5,7 +5,7 @@
   transition: background var(--ease), border-color var(--ease), color var(--ease), transform var(--ease);
 }
 .button:enabled:active { transform: scale(0.98); }
-.primary { background: var(--accent); color: #fff; }
+.primary { box-shadow: inset 0 1px 0 #ffffff60, 0 3px 9px #941b301c; background: var(--ruby); color: #fff; }
 .primary:enabled:hover { background: var(--accent-hover); }
 .secondary { border-color: var(--line); background: var(--surface); color: var(--accent); }
 .secondary:enabled:hover { background: var(--accent-soft); border-color: var(--accent-line); }

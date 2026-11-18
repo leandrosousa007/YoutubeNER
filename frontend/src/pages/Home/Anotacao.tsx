@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type CSSProperties, type FormEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent } from 'react'
 import { Button } from '../../components/Button/Button'
 import { Dialog } from '../../components/Dialog/Dialog'
 import { Icon } from '../../components/Icon/Icon'
@@ -6,7 +6,9 @@ import {
   api, apiColecao, chaveMarcacao, json, mensagem, sobrepoe,
   type Colecao, type Comentario, type ComentarioResumo, type Entidade, type ItemAnotacao, type Marcacao, type NovaRelacao, type Pagina, type Tipo, type Usuario,
 } from '../../features/anotacao/api'
+import { PageCache, PAGE_SIZE, inicioDaPagina } from '../../features/anotacao/pageCache'
 import { GruposAnotacao } from './GruposAnotacao'
+import { EntityPicker } from './EntityPicker'
 import { Inspetor, type Trecho } from './Inspetor'
 import s from './Workbench.module.css'
 
@@ -19,9 +21,20 @@ type Props = {
   selecionar: (id: string) => void
   atualizar: (item: Colecao) => void
   irParaColecoes: () => void
+  aoSalvar: (ocupado: boolean) => void
 }
 
-const TAMANHO = 20
+type Edicao = {
+  aviso: string
+  entidades?: Marcacao[]
+  manter?: Marcacao
+  revisado?: boolean
+  relacoes?: NovaRelacao[]
+  avancar?: boolean
+  ajuste?: string
+}
+
+const TAMANHO = PAGE_SIZE
 const MEDIA_COMPACTA = '(max-width: 55rem)'
 const numero = (n: number) => n.toLocaleString('pt-BR')
 
@@ -40,12 +53,19 @@ function lerTrecho(elemento: HTMLElement): Trecho | null {
   return { inicio, fim: inicio + Array.from(selecionado).length, texto: selecionado }
 }
 
-export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atualizar, irParaColecoes, usuario }: Props) {
+export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atualizar, irParaColecoes, usuario, aoSalvar }: Props) {
   const [pos, setPos] = useState<number | null>(null)
   const [pagina, setPagina] = useState<Pagina | null>(null)
+  const cache = useMemo(() => new PageCache(colecao?.id ?? ''), [colecao?.id])
+  const fila = useRef<Promise<void>>(Promise.resolve())
+  const pendencias = useRef(0)
+  const versaoConfirmada = useRef<number | null>(null)
+  const rolarAte = useRef<number | null>(null)
+  const falhaGravacao = useRef(false)
+  const [salvando, setSalvando] = useState(false)
   const [detalhe, setDetalhe] = useState<Comentario | null>(null)
   const [trecho, setTrecho] = useState<Trecho | null>(null)
-  const [marca, setMarca] = useState<Entidade | null>(null)
+  const [marcaSelecionada, setMarca] = useState<Entidade | null>(null)
   const [revisaoGrupos, setRevisaoGrupos] = useState(0)
   const [busca, setBusca] = useState('')
   const [ocupado, setOcupado] = useState(false)
@@ -63,16 +83,22 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   const [painel, setPainel] = useState<'grupos' | 'detalhes' | null>(null)
   const id = colecao?.id
   const total = colecao?.total ?? 0
-  const inicio = pos === null ? null : Math.floor((pos - 1) / TAMANHO) * TAMANHO + 1
-  const item = detalhe?.pos === pos ? detalhe : null
+  const inicio = pos === null ? null : inicioDaPagina(pos)
+  const item = conjunto ? (detalhe?.pos === pos ? detalhe : null) : pagina?.comentarios.find(c => c.pos === pos) ?? null
+  const marca = marcaSelecionada ? item?.entidades.find(e => e.id === marcaSelecionada.id) ?? null : null
+  const versaoConjunto = conjunto ? detalhe?.versao : undefined
   const opcoesConjuntos = listaConjuntos?.pos === pos ? listaConjuntos.itens : []
-  const podeConfirmar = !!item && !(usuario?.papel === 'anotador' &&
-    (item.revisado || item.estado === 'enviado' || (item.autor && item.autor !== usuario.login)))
-  const porCodigo = new Map([...tipos, ...removidos].map(t => [t.codigo, t]))
+  const restricao = motivoSomenteLeitura(item, usuario)
+  const podeConfirmar = !!item && !restricao && !falhaGravacao.current
+  const edicaoBloqueada = ocupado || !!restricao || falhaGravacao.current
+  const porCodigo = useMemo(() => new Map([...tipos, ...removidos].map(t => [t.codigo, t])), [tipos, removidos])
   const sobreposta = trecho && item?.entidades.some(e => sobrepoe(e, trecho))
-  const linhas = pagina?.comentarios[0]?.pos === inicio ? pagina.comentarios : []
+  const inicioCarregado = pagina?.comentarios[0]?.pos
+  const linhas = pagina && inicioCarregado === inicio ? pagina.comentarios : []
+  const navegacaoOcupada = ocupado || salvando || falhaGravacao.current
   const faltam = total - (colecao?.revisados ?? 0)
   const capturar = useCallback((elemento: HTMLElement, posicao: number) => {
+    if (falhaGravacao.current || (navegacaoOcupada && posicao !== pos)) return
     const selecao = lerTrecho(elemento)
     if (!selecao) return
     setPos(posicao)
@@ -81,7 +107,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     setTrecho(atual => atual?.inicio === selecao.inicio && atual.fim === selecao.fim && atual.texto === selecao.texto ? atual : selecao)
     setErro('')
     setAviso('')
-  }, [pos, conjunto, usuario?.login])
+  }, [pos, conjunto, usuario?.login, navegacaoOcupada])
 
   useEffect(() => {
     const media = window.matchMedia(MEDIA_COMPACTA)
@@ -110,23 +136,53 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     return () => controller.abort()
   }, [id, total, pos, atualizacao, filaRevisao])
 
+  useEffect(() => () => cache.clear(), [cache])
+
   useEffect(() => {
     if (!id || inicio === null) return
-    const controller = new AbortController()
-    api<Pagina>(apiColecao(id) + '/pagina?inicio=' + inicio + '&tamanho=' + TAMANHO, { signal: controller.signal })
-      .then(dados => { if (!controller.signal.aborted) setPagina(dados) })
-      .catch(erro => { if (!controller.signal.aborted) setErro(mensagem(erro)) })
-    return () => controller.abort()
-  }, [id, inicio, total, atualizacao])
+    let ativa = true
+    const carregar = () => {
+      if (document.hidden || falhaGravacao.current) return
+      void cache.load(inicio).then(dados => {
+        if (ativa && !pendencias.current && !falhaGravacao.current) setPagina(dados)
+      }).catch(e => { if (ativa && e.name !== 'AbortError') setErro(mensagem(e)) })
+    }
+    carregar()
+    const timer = window.setInterval(carregar, 30_000)
+    document.addEventListener('visibilitychange', carregar)
+    return () => {
+      ativa = false
+      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', carregar)
+    }
+  }, [id, inicio, cache, atualizacao])
+
+  useEffect(() => {
+    if (!id || inicio === null || inicioCarregado !== inicio) return
+    // Quatro páginas seguintes e a anterior; apenas 100 comentários antecipados.
+    for (const delta of [1, 2, 3, 4, -1]) {
+      const alvo = inicio + delta * TAMANHO
+      if (alvo > 0 && alvo <= total) void cache.load(alvo).catch(() => {})
+    }
+  }, [id, inicio, inicioCarregado, total, cache, atualizacao])
 
   useEffect(() => {
     if (!id || pos === null) return
+    if (!conjunto) return // O detalhe completo já vem na página, sem uma segunda espera.
     const controller = new AbortController()
     api<Comentario>(apiColecao(id) + '/comentarios/' + pos + '?conjunto=' + encodeURIComponent(conjunto), { signal: controller.signal })
       .then(dados => { if (!controller.signal.aborted) setDetalhe(dados) })
-      .catch(erro => { if (!controller.signal.aborted) setErro(mensagem(erro)) })
+      .catch(e => { if (!controller.signal.aborted) setErro(mensagem(e)) })
     return () => controller.abort()
   }, [id, pos, atualizacao, conjunto])
+
+  useEffect(() => {
+    aoSalvar(salvando)
+    if (!salvando) return
+    const avisar = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = '' }
+    window.addEventListener('beforeunload', avisar)
+    return () => window.removeEventListener('beforeunload', avisar)
+  }, [salvando, aoSalvar])
 
   useEffect(() => {
     if (!id || !usuario || pos === null) return
@@ -134,11 +190,20 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     api<{ autor: string; estado: string }[]>(apiColecao(id) + '/comentarios/' + pos + '/conjuntos', { signal: ac.signal })
       .then(itens => { if (!ac.signal.aborted) setListaConjuntos({ pos, itens }) }).catch(() => {})
     return () => ac.abort()
-  }, [id, pos, usuario, revisaoGrupos])
+  }, [id, pos, usuario, versaoConjunto])
+
+  useEffect(() => {
+    if (rolarAte.current === pos && pos !== null && linhas.length) {
+      const texto = document.querySelector<HTMLElement>(`[data-comentario-pos="${pos}"]`)
+      texto?.focus({ preventScroll: true })
+      texto?.scrollIntoView({ block: 'nearest' })
+      rolarAte.current = null
+    }
+  }, [pos, linhas.length])
 
   useEffect(() => {
     if (marca?.id) document.getElementById('span-' + marca.id)?.scrollIntoView({ block: 'nearest' })
-  }, [marca?.id, pagina])
+  }, [marca?.id])
 
   function limparSelecao() {
     setTrecho(null)
@@ -146,20 +211,37 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     window.getSelection()?.removeAllRanges()
   }
 
+  function recarregar() {
+    limparSelecao()
+    setErro('')
+    falhaGravacao.current = false
+    cache.clear()
+    setPagina(null)
+    setDetalhe(null)
+    setRevisaoGrupos(n => n + 1)
+    setAtualizacao(n => n + 1)
+  }
+
   function ir(pagina: number) {
-    if (ocupado || pagina < 1 || pagina > total) return
+    if (navegacaoOcupada || pagina < 1 || pagina > total) return
     limparSelecao()
     setConjunto('')
     setEventos(null)
     setFeedback('')
+    const pronta = cache.peek(inicioDaPagina(pagina))
+    if (pronta) setPagina(pronta)
+    setDetalhe(null)
     setPos(pagina)
     setErro('')
     setAviso('')
   }
 
   function receber(dados: { comentario: Comentario; colecao: Colecao }) {
-    if (dados.comentario.pos === pos) setDetalhe(dados.comentario)
-    if (conjunto) { setRevisaoGrupos(n => n+1); return }
+    if (conjunto) {
+      setDetalhe(dados.comentario)
+      return
+    }
+    cache.update(dados.comentario)
     setPagina(anterior => anterior ? { ...anterior,
       comentarios: anterior.comentarios.map(linha => linha.pos === dados.comentario.pos ? dados.comentario : linha),
     } : anterior)
@@ -167,51 +249,99 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     setRevisaoGrupos(n => n + 1)
   }
 
-  async function salvar(entidades: Marcacao[], revisado: boolean, rejeitadas: Marcacao[], aviso: string, manter?: Marcacao, relacoes?: NovaRelacao[], avancar = false, ajuste?: string) {
-    if (!item || !id || ocupado) return
-    setOcupado(true)
-    setErro('')
-    setAviso('')
+  async function avancarAposRevisao(anterior: number, aviso: string) {
+    if (!id || (conjunto && usuario?.papel === 'anotador')) return
     try {
-      const dados = await api<{ comentario: Comentario; colecao: Colecao }>(
-        apiColecao(id) + '/comentarios/' + item.pos + '?conjunto=' + encodeURIComponent(conjunto),
-        json('PUT', { versao: item.versao, entidades, revisado, rejeitadas, relacoes, ajuste }),
-      )
-      receber(dados)
-      limparSelecao()
-      if (manter) setMarca(dados.comentario.entidades.find(e => chaveMarcacao(e) === chaveMarcacao(manter)) ?? null)
-      setAviso(aviso)
-      if (avancar && (!conjunto || usuario?.papel !== 'anotador')) {
-        try {
-          if (conjunto) {
-            if (!await abrirProximoConjunto()) setAviso(aviso + ' A fila está vazia.')
-          } else {
-            const proximo = await api<{ pos: number | null }>(apiColecao(id) + '/proximo?depois=' + item.pos + '&revisao=' + filaRevisao, { method: 'POST' })
-            if (proximo.pos !== null) { setEventos(null); setFeedback(''); setPos(proximo.pos) }
-            else setAviso(aviso + ' A fila está vazia.')
-          }
-        } catch { setAviso(aviso + ' Não foi possível abrir o próximo. Use o botão da fila para tentar de novo.') }
+      if (conjunto) {
+        if (!await abrirProximoConjunto()) setAviso(aviso + ' A fila está vazia.')
+        return
       }
-    } catch (erro) { setErro(mensagem(erro)) }
-    finally { setOcupado(false) }
+      const query = new URLSearchParams({ depois: String(anterior), revisao: String(filaRevisao) })
+      const proximo = await api<{ pos: number | null }>(apiColecao(id) + '/proximo?' + query, { method: 'POST' })
+      if (proximo.pos === null) {
+        setAviso(aviso + ' A fila está vazia.')
+        return
+      }
+      limparSelecao()
+      setDetalhe(null)
+      setEventos(null)
+      setFeedback('')
+      const pronta = cache.peek(inicioDaPagina(proximo.pos))
+      if (pronta) setPagina(pronta)
+      rolarAte.current = proximo.pos
+      setPos(proximo.pos)
+    } catch { setAviso(aviso + ' Use o botão da fila para abrir o próximo.') }
+  }
+
+  async function salvar(edicao: Edicao) {
+    if (!item || !id || edicaoBloqueada) return
+    const { entidades = item.entidades, revisado = false, relacoes, avancar, ajuste, aviso, manter } = edicao
+    const { rejeitadas, versao } = item
+    if (avancar || item.revisado !== revisado) setOcupado(true)
+    const chars = Array.from(item.texto)
+    const novas = entidades.map(e => ({ ...e, id: e.id ?? crypto.randomUUID().replaceAll('-', ''), texto: chars.slice(e.inicio, e.fim).join('') })).sort((a,b) => a.inicio-b.inicio)
+    const ids = new Set(novas.map(e => e.id))
+    const otimista: Comentario = { ...item, entidades: novas, revisado, rejeitadas,
+      relacoes: (relacoes ?? item.relacoes).filter(r => ids.has(r.source) && ids.has(r.target)).map(r => ({ ...r, id: r.id ?? crypto.randomUUID().replaceAll('-', '') })) }
+    // A marcação aparece no mesmo clique. Gravações seguem em ordem, com a versão confirmada pelo servidor.
+    if (conjunto) setDetalhe(otimista)
+    else {
+      cache.update(otimista)
+      setPagina(p => p ? { ...p, comentarios:p.comentarios.map(c => c.pos === item.pos ? otimista : c) } : p)
+    }
+    limparSelecao()
+    if (manter) setMarca(novas.find(e => chaveMarcacao(e) === chaveMarcacao(manter)) ?? null)
+    setErro('')
+    setAviso('Salvando…')
+    pendencias.current++
+    setSalvando(true)
+    const operacao = fila.current.then(async () => {
+      if (falhaGravacao.current) return
+      try {
+        const dados = await api<{ comentario: Comentario; colecao: Colecao }>(
+          apiColecao(id) + '/comentarios/' + item.pos + '?conjunto=' + encodeURIComponent(conjunto),
+          json('PUT', { versao:versaoConfirmada.current ?? versao, entidades:novas,
+            revisado, rejeitadas, relacoes:relacoes ? otimista.relacoes : undefined, ajuste }),
+        )
+        versaoConfirmada.current = dados.comentario.versao
+        if (pendencias.current === 1) {
+          receber(dados)
+          setAviso(aviso)
+        } else atualizar(dados.colecao)
+        if (avancar) await avancarAposRevisao(item.pos, aviso)
+      } catch (e) {
+        falhaGravacao.current = true
+        setErro(mensagem(e) + ' As alterações pendentes não foram confirmadas. Recarregue para conferir o que está salvo.')
+        setAviso('')
+      }
+    }).finally(() => {
+      pendencias.current--
+      if (!pendencias.current) {
+        versaoConfirmada.current = null
+        setOcupado(false)
+        setSalvando(false)
+      }
+    })
+    fila.current = operacao
+    await operacao
   }
 
   function aplicarTipo(tipo: string) {
-    if (!item || ocupado) return
+    if (!item || edicaoBloqueada) return
     if (marca) {
       if (marca.tipo === tipo) return
       const editada = { ...marca, tipo }
-      void salvar(item.entidades.map(e => e.id === marca.id ? editada : e), false, item.rejeitadas, 'Tipo atualizado.', editada)
+      void salvar({ entidades: item.entidades.map(e => e.id === marca.id ? editada : e), aviso: 'Tipo atualizado.', manter: editada })
     } else if (trecho && !sobreposta) {
       const nova = { ...trecho, tipo }
-      void salvar([...item.entidades, nova], false, item.rejeitadas, 'Entidade salva.', nova)
+      void salvar({ entidades: [...item.entidades, nova], aviso: 'Entidade salva.', manter: nova })
     }
   }
 
   async function excluir(posicao: number, span: string) {
-    if (!id || ocupado) return
+    if (!id || navegacaoOcupada) return
     if (conjunto && item) {
-      await salvar(item.entidades.filter(e => e.id !== span), false, item.rejeitadas, 'Marcação excluída.')
+      await salvar({ entidades: item.entidades.filter(e => e.id !== span), aviso: 'Marcação excluída.' })
       return
     }
     setOcupado(true)
@@ -230,7 +360,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
 
   async function localizar(evento: FormEvent<HTMLFormElement>) {
     evento.preventDefault()
-    if (!id || ocupado || !busca.trim()) return
+    if (!id || navegacaoOcupada || !busca.trim()) return
     try {
       const dados = await api<{ pos: number }>(apiColecao(id) + '/por-id?' + new URLSearchParams({ id: busca.trim() }))
       ir(dados.pos)
@@ -238,7 +368,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   }
 
   async function pendente(revisao = filaRevisao) {
-    if (!id || ocupado) return
+    if (!id || navegacaoOcupada) return
     try {
       const dados = await api<{ pos: number | null }>(apiColecao(id) + '/proximo?depois=' + (pos ?? 0) + '&revisao=' + revisao, { method: 'POST' })
       if (dados.pos === null) setAviso('Não há comentários disponíveis nesta fila.')
@@ -254,6 +384,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     setDetalhe(null)
     setEventos(null)
     setFeedback('')
+    rolarAte.current = proximo.pos
     setConjunto(proximo.autor)
     setPos(proximo.pos)
     setAtualizacao(n => n + 1)
@@ -261,13 +392,13 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   }
 
   function confirmar() {
-    if (!item || ocupado || !podeConfirmar) return
+    if (!item || navegacaoOcupada || !podeConfirmar) return
     if (trecho && !marca) {
       setErro('Escolha um rótulo para o trecho selecionado ou limpe a seleção antes de confirmar.')
       return
     }
-    void salvar(item.entidades, !item.revisado, item.rejeitadas, item.revisado ? 'Comentário reaberto.' :
-      usuario?.papel === 'anotador' ? 'Enviado para revisão.' : 'Revisão confirmada.', undefined, undefined, !item.revisado)
+    const aviso = item.revisado ? 'Comentário reaberto.' : usuario?.papel === 'anotador' ? 'Enviado para revisão.' : 'Revisão confirmada.'
+    void salvar({ revisado: !item.revisado, avancar: !item.revisado, aviso })
   }
 
   async function filtrar(query: string, depois = 0) {
@@ -279,7 +410,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
 
   useEffect(() => {
     function atalho(e: KeyboardEvent) {
-      if (e.key === 'Enter' && e.ctrlKey && !e.metaKey && !e.repeat && podeConfirmar && !ocupado &&
+      if (e.key === 'Enter' && e.ctrlKey && !e.metaKey && !e.repeat && podeConfirmar && !navegacaoOcupada &&
           !(e.target instanceof HTMLTextAreaElement) && !painel && !item?.revisado) {
         e.preventDefault()
         confirmar()
@@ -296,21 +427,28 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   }
 
   function escolherMarca(e: Entidade, linha: ComentarioResumo) {
-    if (ocupado || !window.getSelection()?.isCollapsed) return
+    if (ocupado || (salvando && linha.pos !== pos) || !window.getSelection()?.isCollapsed) return
     setPos(linha.pos)
     setTrecho(null)
     setMarca(e)
   }
 
-  if (!colecao) return <section className={s.panel}><h1>Bancada de anotação</h1><p>Sincronize os comentários do PostgreSQL para começar.</p><Button onClick={irParaColecoes}>Abrir coleções</Button></section>
+  if (!colecao) return <section className={s.panel}><h1>Bancada de anotação</h1><p>Prepare o acervo fixo para começar.</p><Button onClick={irParaColecoes}>Abrir coleções</Button></section>
 
-  const grupos = <GruposAnotacao colecao={colecao.id} tipos={tipos} revisao={revisaoGrupos} selecionada={marca?.id} ocupado={ocupado}
+  const grupos = <GruposAnotacao colecao={colecao.id} tipos={tipos} revisao={revisaoGrupos} selecionada={marca?.id} ocupado={navegacaoOcupada}
     localizar={localizarMarca} excluir={e => void excluir(e.pos, e.id)} embutido={compacto} />
-  const inspetor = <Inspetor item={item} marca={marca} trecho={trecho} tipos={tipos} ocupado={ocupado} sobreposta={!!sobreposta}
+  const rotuloRevisao = salvando ? 'Salvando…' : item?.revisado ? 'Reabrir revisão' :
+    usuario?.papel === 'anotador' ? (conjunto ? 'Enviar conjunto' : 'Enviar e avançar') : 'Concluir e avançar'
+  const falhou = falhaGravacao.current
+  const acaoRevisao = falhou ? recarregar : confirmar
+  const textoAcao = falhou ? 'Recarregar comentário' : rotuloRevisao
+  const acaoBloqueada = falhou ? salvando : navegacaoOcupada || !podeConfirmar
+  const inspetor = <Inspetor item={item} marca={marca} trecho={trecho} tipos={tipos} ocupado={edicaoBloqueada} salvando={salvando} restricao={restricao} sobreposta={!!sobreposta}
     aplicarTipo={aplicarTipo} excluir={span => { if (item) void excluir(item.pos, span) }}
     limpar={limparSelecao} escolher={e => { limparSelecao(); setMarca(e) }}
-    salvarRelacoes={relacoes => item ? salvar(item.entidades, false, item.rejeitadas, 'Relações salvas.', undefined, relacoes) : Promise.resolve()}
-    revisar={confirmar} />
+    salvarRelacoes={relacoes => salvar({ relacoes, aviso: 'Relações salvas.' })}
+    revisar={acaoRevisao} revisaoBloqueada={acaoBloqueada}
+    rotuloRevisao={textoAcao} />
 
   return (
     <div className={s.workbench}>
@@ -321,7 +459,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
       <header className={s.toolbar}>
         <div className={s.collectionControl}>
           <label htmlFor="colecao-atual">Coleção</label>
-          <select id="colecao-atual" value={colecao.id} disabled={ocupado} onChange={evento => selecionar(evento.target.value)}>
+          <select id="colecao-atual" value={colecao.id} disabled={navegacaoOcupada} onChange={evento => selecionar(evento.target.value)}>
             {colecoes.map(c => <option key={c.id} value={c.id}>{c.nome}</option>)}
           </select>
         </div>
@@ -345,7 +483,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
 
       {(erro || (!compacto && aviso)) && <div className={erro ? s.error : s.notice} role={erro ? 'alert' : 'status'}>
         {!erro && <Icon name="check" width="18" height="18" />}{erro || aviso}
-        {erro && <button type="button" onClick={() => { limparSelecao(); setErro(''); setAtualizacao(n => n + 1) }}>Recarregar</button>}
+        {erro && <button type="button" onClick={recarregar}>Recarregar</button>}
       </div>}
 
       <div className={s.columns}>
@@ -354,20 +492,20 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
         <section className={s.document} aria-label="Comentários da coleção">
           <div className={s.docHeader}>
             <div className={s.group}>
-              <button type="button" aria-label="Primeira página" disabled={ocupado || inicio === null || inicio <= 1} onClick={() => ir(1)}><Icon name="first" width="17" height="17" /></button>
-              <button type="button" aria-label="Página anterior" disabled={ocupado || inicio === null || inicio <= 1} onClick={() => ir(Math.max(1, (inicio ?? 1) - TAMANHO))}><Icon name="left" width="17" height="17" /></button>
+              <button type="button" aria-label="Primeira página" disabled={navegacaoOcupada || inicio === null || inicio <= 1} onClick={() => ir(1)}><Icon name="first" width="17" height="17" /></button>
+              <button type="button" aria-label="Página anterior" disabled={navegacaoOcupada || inicio === null || inicio <= 1} onClick={() => ir(Math.max(1, (inicio ?? 1) - TAMANHO))}><Icon name="left" width="17" height="17" /></button>
               <span className={s.counter}>{inicio && total ? numero(inicio) + '–' + numero(Math.min(total, inicio + TAMANHO - 1)) : '0'} / {numero(total)}</span>
-              <button type="button" aria-label="Próxima página" disabled={ocupado || inicio === null || inicio + TAMANHO > total} onClick={() => ir((inicio ?? 1) + TAMANHO)}><Icon name="right" width="17" height="17" /></button>
-              <button type="button" aria-label="Última página" disabled={ocupado || inicio === null || inicio + TAMANHO > total} onClick={() => ir(Math.floor((total - 1) / TAMANHO) * TAMANHO + 1)}><Icon name="last" width="17" height="17" /></button>
+              <button type="button" aria-label="Próxima página" disabled={navegacaoOcupada || inicio === null || inicio + TAMANHO > total} onClick={() => ir((inicio ?? 1) + TAMANHO)}><Icon name="right" width="17" height="17" /></button>
+              <button type="button" aria-label="Última página" disabled={navegacaoOcupada || inicio === null || inicio + TAMANHO > total} onClick={() => ir(Math.floor((total - 1) / TAMANHO) * TAMANHO + 1)}><Icon name="last" width="17" height="17" /></button>
             </div>
             <form className={s.group} onSubmit={evento => void localizar(evento)}>
               <input aria-label="Buscar ID do comentário" placeholder="Buscar ID" value={busca} onChange={e => setBusca(e.target.value)} />
-              <button type="submit" disabled={!busca.trim() || ocupado}>Ir ao ID</button>
+              <button type="submit" disabled={!busca.trim() || navegacaoOcupada}>Ir ao ID</button>
             </form>
-            <button type="button" disabled={!faltam || ocupado} onClick={() => void pendente()}>{filaRevisao ? 'Próximo para aprovar' : 'Próximo pendente'}</button>
-            {usuario && usuario.papel !== 'anotador' && <button type="button" aria-pressed={filaRevisao} disabled={ocupado}
+            <button type="button" disabled={!faltam || navegacaoOcupada} onClick={() => void pendente()}>{filaRevisao ? 'Próximo para aprovar' : 'Próximo pendente'}</button>
+            {usuario && usuario.papel !== 'anotador' && <button type="button" aria-pressed={filaRevisao} disabled={navegacaoOcupada}
               onClick={() => { setFilaRevisao(!filaRevisao); void pendente(!filaRevisao) }}>{filaRevisao ? 'Voltar à anotação' : 'Fila de revisão'}</button>}
-            {usuario && usuario.papel !== 'anotador' && <button type="button" disabled={ocupado} onClick={() => {
+            {usuario && usuario.papel !== 'anotador' && <button type="button" disabled={navegacaoOcupada} onClick={() => {
               setErro('')
               void abrirProximoConjunto().then(abriu => setAviso(abriu ? '' : 'Nenhum conjunto independente aguardando revisão.')).catch(e => setErro(mensagem(e)))
             }}>Revisar conjuntos</button>}
@@ -383,9 +521,6 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
               <input name="texto" aria-label="Texto do comentário" placeholder="Texto" maxLength={200} />
               <select name="tipo" aria-label="Filtrar por rótulo"><option value="">Todos os rótulos</option>{tipos.map(t => <option key={t.codigo}>{t.codigo}</option>)}</select>
               {usuario && <><input name="autor" aria-label="Anotador" placeholder="Login do anotador" maxLength={100} />
-                <input name="video" aria-label="ID do vídeo" placeholder="ID do vídeo" maxLength={11} />
-                <label>De <input type="date" name="de" aria-label="Data inicial" /></label>
-                <label>Até <input type="date" name="ate" aria-label="Data final" /></label>
                 <select name="estado" aria-label="Etapa da anotação"><option value="">Todas as etapas</option>
                   <option value="pendente">Pendente</option><option value="rascunho">Em andamento</option>
                   <option value="enviado">Aguardando revisão</option><option value="ajuste">Precisa de ajuste</option><option value="revisado">Revisado</option></select></>}
@@ -396,12 +531,12 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
               <a href={apiColecao(colecao.id) + '/exportar?formato=csv&' + filtros}>Exportar CSV com estes filtros</a>
             </div>}
             {resultados && <div><p>{resultados.itens.length ? 'Selecione um resultado para abrir o comentário.' : 'Nenhum resultado.'}</p>
-              <ul>{resultados.itens.map(r => <li key={r.pos}><button type="button" disabled={ocupado} onClick={() => ir(r.pos)}>{r.id} · {r.texto.slice(0, 130)}</button></li>)}</ul>
+              <ul>{resultados.itens.map(r => <li key={r.pos}><button type="button" disabled={navegacaoOcupada} onClick={() => ir(r.pos)}>{r.id} · {r.texto.slice(0, 130)}</button></li>)}</ul>
               {resultados.proximo !== null && <Button variant="secondary" onClick={() => void filtrar(filtros, resultados.proximo!)}>Mais resultados</Button>}</div>}
           </details>
           {usuario && pos !== null && <div className={s.docHeader}>
             <label htmlFor="conjunto">Conjunto de anotações</label>
-            <select id="conjunto" value={conjunto} disabled={ocupado} onChange={e => {
+            <select id="conjunto" value={conjunto} disabled={navegacaoOcupada} onChange={e => {
               setDetalhe(null); limparSelecao(); setConjunto(e.target.value); setEventos(null); setAviso('')
             }}>
               <option value="">Principal</option><option value={usuario.login}>Minha anotação independente</option>
@@ -418,15 +553,12 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
               {e.anterior.entidades?.length > 0 && <p>{e.anterior.entidades.map(a => a.tipo + ': ' + a.texto).join(' · ')}</p>}
             </li>)}</ul>}
           </div>}
-          {item && <div className={s.docHeader}>
-            <Button disabled={ocupado || !podeConfirmar}
-              onClick={confirmar}>{ocupado ? 'Salvando…' : item.revisado ? 'Reabrir revisão' :
-                usuario?.papel === 'anotador' ? (conjunto ? 'Enviar conjunto' : 'Enviar e avançar') : 'Confirmar e avançar'}</Button>
-            <span className={s.help}>{item.autor ? 'Anotação de ' + item.autor + ' · ' : ''}{item.estado === 'enviado' ? 'Aguardando revisão' : item.feedback || (aviso ? aviso : 'Ctrl + Enter para confirmar')}</span>
+          {item && (!compacto || usuario) && <div className={s.docHeader}>
+            <span className={s.help}>{item.autor ? 'Anotação de ' + item.autor + ' · ' : ''}{item.estado === 'enviado' ? 'Aguardando revisão' : item.feedback || (restricao || aviso || (item.revisado ? 'Revisão concluída' : 'Ctrl + Enter para concluir'))}</span>
             {item.estado === 'enviado' && usuario && usuario.papel !== 'anotador' && <>
               <input aria-label="Ajuste solicitado" placeholder="Descreva o ajuste" maxLength={1000} value={feedback} onChange={e => setFeedback(e.target.value)} />
-              <Button variant="secondary" disabled={ocupado || !feedback.trim()} onClick={() => {
-                void salvar(item.entidades, false, item.rejeitadas, 'Ajuste solicitado.', undefined, undefined, true, feedback.trim())
+              <Button variant="secondary" disabled={navegacaoOcupada || !feedback.trim()} onClick={() => {
+                void salvar({ ajuste: feedback.trim(), avancar: true, aviso: 'Ajuste solicitado.' })
                 setFeedback('')
               }}>Pedir ajuste</Button>
             </>}
@@ -436,7 +568,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
               {linhas.map(linha => {
                 const atual = item?.pos === linha.pos ? item : linha
                 return <li key={linha.id} className={pos === linha.pos ? s.activeRow : undefined}>
-                  <button className={s.rowNumber} type="button" aria-current={pos === linha.pos ? 'true' : undefined} disabled={ocupado}
+                  <button className={s.rowNumber} type="button" aria-current={pos === linha.pos ? 'true' : undefined} disabled={navegacaoOcupada}
                     title={linha.id} aria-label={'Selecionar comentário ' + linha.id} onClick={() => ir(linha.pos)}>
                     {numero(linha.pos)}<span aria-label={atual.revisado ? 'Revisado' : 'Pendente'}>{atual.revisado ? '✓' : '·'}</span>
                   </button>
@@ -460,15 +592,13 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
       {compacto && <div className={s.mobileDock} aria-label="Controles de anotação">
         {(marca || trecho) && <div className={s.quickTypes}>
           <div className={s.quickContext}><strong>{marca?.texto ?? trecho?.texto}</strong><span role="status">{sobreposta ? 'Trecho sobreposto' : aviso || (marca ? 'Alterar tipo' : 'Toque para marcar')}</span></div>
-          {tipos.length > 0 && <ul aria-label="Tipos rápidos">{tipos.map(t => <li key={t.codigo}>
-            <button type="button" aria-label={t.codigo + ' · ' + t.nome} aria-pressed={marca?.tipo === t.codigo}
-              disabled={!item || ocupado || !!sobreposta} onClick={() => aplicarTipo(t.codigo)}>
-              <span className={s.dot} style={{ '--tag': t.cor } as CSSProperties} />{t.codigo}
-            </button>
-          </li>)}</ul>}
+          <EntityPicker tipos={tipos} ativo={marca?.tipo} bloqueado={!item || edicaoBloqueada || !!sobreposta} escolher={aplicarTipo} />
         </div>}
-        {!marca && !trecho && aviso && <div className={s.dockStatus} role="status">{aviso}</div>}
+        {!marca && !trecho && item && <div className={s.dockContext} role="status">
+          <strong>Comentário {numero(item.pos)}</strong><span>{falhou ? 'Falha ao salvar' : restricao || aviso}</span>
+        </div>}
         <div className={s.dockActions}>
+          <Button disabled={acaoBloqueada} onClick={acaoRevisao}>{textoAcao}</Button>
           {!conjunto && <Button variant="secondary" onClick={() => setPainel('grupos')}><Icon name="list" width="17" height="17" /> Marcações</Button>}
           <Button variant="secondary" aria-label="Detalhes do trecho" disabled={!item} onClick={() => setPainel('detalhes')}><Icon name="more" width="17" height="17" /> Detalhes</Button>
         </div>
@@ -477,6 +607,15 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
       {compacto && painel === 'detalhes' && <Dialog title="Trecho selecionado" sheet close={() => setPainel(null)}>{inspetor}</Dialog>}
     </div>
   )
+}
+
+function motivoSomenteLeitura(item: Comentario | null, usuario: Usuario | null) {
+  if (!item || !usuario || usuario.papel === 'admin') return ''
+  const deOutro = !!item.autor && item.autor !== usuario.login
+  const finalizado = item.estado === 'enviado' || item.revisado
+  if (usuario.papel === 'anotador' && finalizado) return 'Somente leitura. Este comentário já foi enviado para revisão.'
+  if (deOutro && (usuario.papel === 'anotador' || !finalizado)) return 'Somente leitura. Comentário reservado a ' + item.autor + '.'
+  return ''
 }
 
 type TextoProps = {

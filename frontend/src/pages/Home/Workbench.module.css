@@ -82,14 +82,6 @@
 .inspectorSection { min-width: 0; padding-top: var(--space-2); border-top: 1px solid var(--line); }
 .inspectorSection h3 { margin: 0 0 var(--space-1); font-size: 0.86rem; }
 .inspectorSection h3 span { color: var(--muted); font-weight: 550; }
-.palette { display: grid; gap: 0.18rem; max-height: 18rem; overflow: auto; scrollbar-width: thin; padding: 0.16rem; }
-.palette li button:not([class]) {
-  display: grid; grid-template-columns: 0.5rem auto minmax(0, 1fr); align-items: center; gap: var(--space-2);
-  width: 100%; min-height: 2.2rem; padding: 0.25rem 0.43rem; border-radius: var(--r-sm); text-align: left;
-}
-.palette li button[aria-pressed=true] { border-color: var(--accent-line); background: var(--accent-soft); }
-.palette strong { font-size: 0.72rem; }
-.palette small { text-align: end; color: var(--muted); font-size: 0.72rem; overflow-wrap: anywhere; }
 .inspectList li { padding: 0.29rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; font-size: var(--small); }
 .inspectList li > button { width: 100%; flex-direction: column; align-items: flex-start !important; text-align: left; border-radius: var(--r-sm) !important; }
 .inspectList small { display: block; color: var(--muted); margin: 0.12rem 0; }
@@ -113,16 +105,14 @@
     background: var(--glass-strong); backdrop-filter: var(--blur); box-shadow: var(--shadow-float);
   }
   .rowContent mark { scroll-margin-bottom: 9rem; }
-  .dockStatus { color: var(--green); font-size: var(--small); }
+  .dockContext { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); font-size: var(--small); }
+  .dockContext span { text-align: right; color: var(--muted); }
   .dockActions { display: flex; justify-content: space-between; gap: var(--space-2); }
   .dockActions > button { flex: 1; min-width: 0; }
   .quickTypes { min-width: 0; }
   .quickContext { display: flex; justify-content: space-between; gap: var(--space-2); font-size: var(--small); }
   .quickContext strong { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .quickContext span { color: var(--muted); white-space: nowrap; }
-  .quickTypes ul { display: flex; overflow-x: auto; gap: var(--space-2); padding: var(--space-1) 0; margin: 0; list-style: none; scrollbar-width: thin; }
-  .quickTypes button { display: inline-flex; gap: var(--space-2); align-items: center; white-space: nowrap; min-height: var(--control); padding: 0.25rem var(--space-3); border: 1px solid var(--line-control); border-radius: var(--pill); color: var(--accent); background: var(--surface); font-size: 0.76rem; font-weight: 650; }
-  .quickTypes button[aria-pressed=true] { background: var(--accent-soft); border-color: var(--accent-line); }
   .groupLabel, .entryText, .entryRemove { min-height: var(--control); }
   .entryRemove { min-width: var(--control); }
 }
@@ -146,4 +136,15 @@
   .docHeader button { padding-inline: var(--space-2); }
   .rows li { grid-template-columns: 2rem minmax(0, 1fr); }
   .rowContent { padding-inline: var(--space-2); }
+}
+
+.reviewTop { position:sticky; top:0; z-index:2; background:var(--glass-strong); backdrop-filter:var(--blur); padding-block:4px; }
+.reviewTop button { width:100%; }
+.inspector:has(.reviewTop) { scroll-padding-top:3.5rem; }
+@media(min-width:55.01rem) { .columns { grid-template-columns:minmax(11rem, 17%) minmax(0,1fr) clamp(17rem,25vw,23rem); } }
+
+.rows [data-comentario-pos] { scroll-margin-top: calc(var(--header) + 2rem); }
+@media (max-width: 55rem) {
+  .rows [data-comentario-pos] { scroll-margin-bottom: 7.5rem; }
+  .dockActions button { padding-inline: .4rem; }
 }

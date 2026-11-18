@@ -1,19 +1,18 @@
-import os
 import re
-import subprocess
 import tempfile
 from datetime import datetime, timezone
+from contextlib import closing
 from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
-from psycopg.conninfo import conninfo_to_dict
+import sqlite3
 from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
-from .corpus import banco
-from .pg_storage import enabled
+from .corpus import banco, PASTA
+from .config import enabled
 from .security import PADRAO_LOGIN, limitar, senha_codificada, usuario
 
 
@@ -42,7 +41,7 @@ class Acesso(BaseModel):
 @router.get("/usuarios")
 def listar_usuarios():
     with banco() as db:
-        return db.execute("SELECT login,papel,ativo FROM usuarios ORDER BY login").fetchall()
+        return [dict(r) for r in db.execute("SELECT login,papel,ativo FROM usuarios ORDER BY login")]
 
 
 @router.post("/usuarios", status_code=201)
@@ -56,7 +55,7 @@ def criar_usuario(conta: Conta):
             ON CONFLICT DO NOTHING RETURNING login,papel,ativo""", (login, senha, conta.papel)).fetchone()
         if not criado:
             raise HTTPException(409, "Esse login já existe.")
-        return criado
+        return dict(criado)
 
 
 @router.put("/usuarios/{login}")
@@ -70,30 +69,23 @@ def alterar_acesso(login: str, acesso: Acesso, operador: str = Depends(administr
             raise HTTPException(404, "Conta não encontrada.")
         if not acesso.ativo:
             db.execute("DELETE FROM sessoes WHERE login=?", (login,))
-        return conta
+        return dict(conta)
 
 
 @router.post("/backup")
 def baixar_backup(request: Request):
     limitar("backup", request.headers.get("x-ytn-client", "desconhecido"), 2, 4, 3600)
     pasta = tempfile.TemporaryDirectory(prefix="youtubener-backup-")
-    arquivo = Path(pasta.name) / "backup.dump"
-    config = Path(pasta.name) / "pg_service.conf"
+    arquivo = Path(pasta.name) / "anotacoes.sqlite3"
     try:
-        conexao = conninfo_to_dict(os.environ["YOUTUBENER_APP_DSN"])
-        if any("\n" in valor or "\r" in valor for valor in conexao.values()):
-            raise ValueError("Configuração inválida para o serviço de backup.")
-        config.write_text("[youtubener_backup]\n" + "".join(f"{chave}={valor}\n" for chave, valor in conexao.items()),
-                          encoding="utf-8")
-        env = {**os.environ, "PGSERVICEFILE": str(config), "PGSERVICE": "youtubener_backup"}
-        subprocess.run(["pg_dump", "--no-password", "--format=custom", "--no-owner", "--no-privileges",
-                        "--schema=ytn_app", "--exclude-table-data=ytn_app.sessoes",
-                        "--exclude-table-data=ytn_app.limites", "--file", str(arquivo)],
-                       env=env, check=True, timeout=70, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        config.unlink()
-    except (OSError, ValueError, subprocess.SubprocessError):
+        with closing(sqlite3.connect(PASTA / "anotacoes.sqlite3")) as origem, closing(sqlite3.connect(arquivo)) as copia:
+            origem.backup(copia)
+            copia.execute("DELETE FROM sessoes")
+            copia.execute("DELETE FROM limites")
+            copia.commit()
+    except sqlite3.Error:
         pasta.cleanup()
-        raise HTTPException(503, "O backup pelo navegador falhou. Use o script de backup no servidor.")
+        raise HTTPException(503, "Não foi possível gerar o backup. Tente novamente.")
     data = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return FileResponse(arquivo, filename=f"youtubener-{data}.dump", media_type="application/octet-stream",
+    return FileResponse(arquivo, filename=f"youtubener-anotacoes-{data}.sqlite3", media_type="application/octet-stream",
                         background=BackgroundTask(pasta.cleanup))

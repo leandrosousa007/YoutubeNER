@@ -1,62 +1,108 @@
-# YouTubeNER
+# YouTubeNER · Estúdio de anotação
 
-Para publicar o frontend na Cloudflare Pages e o backend e PostgreSQL na Oracle, siga o [guia de implantação](deploy/ORACLE-CLOUDFLARE.md).
+React + TypeScript na interface e Python/FastAPI no servidor. Um único endereço serve o site e a API. Sem PostgreSQL, Neon, coleta de novos vídeos ou sincronização externa.
 
-Ferramenta local de coleta e anotação de comentários do YouTube para pesquisa em Processamento de Linguagem Natural. O corpus é usado na anotação de entidades nomeadas e poderá servir para treinar modelos de NER.
+## Seus dados
 
-## Coletar e anotar
+- `data/acervo.sqlite3`: acervo fixo, indexado, aberto **somente para leitura**. Cada registro conserva coleção, posição, ID original e texto sem normalização.
+- `data/anotacoes.sqlite3`: marcações JSON, relações, versões, revisão, tipos de entidade, contas e histórico. Guarda somente comentários que já tiveram alterações. É um arquivo SQLite, sem um servidor de banco separado.
+- `data/acervo.manifest.json`: contagem e SHA-256 dos IDs/textos para conferência.
 
-1. Em **Coleções**, informe o ID do vídeo. **Adicionar ao PostgreSQL** grava os comentários principais em `dataset.comentario`; **Baixar CSV do vídeo** gera um arquivo sem gravar no banco. As respostas a comentários não são coletadas.
-2. Clique em **Anotar comentários do banco**. Selecione um trecho no painel central e clique em um dos 18 tipos à direita. A marcação é salva na hora. Clique em uma marcação existente para mudar o tipo ou excluí-la.
-3. À esquerda, abra um grupo para ver os trechos marcados em toda a coleção. Clique em um trecho para localizar seu comentário, ou no **×** para excluir a marcação. O botão exclui a anotação, sem apagar o comentário. Relações que usam aquele trecho são removidas junto com a marcação.
-4. Após marcar dois trechos, use **Nova relação** para ligá-los. Use **Concluir revisão** também nos comentários sem entidades e **Próximo pendente** para continuar de onde parou.
+O acervo entregue tem **59.086 comentários**, **63 revisados** e **37 com entidades**. Os arquivos de origem em `comentarios/colecoes` foram preservados e não são mais lidos pelo aplicativo.
 
-A aba **Entidades** permite criar tipos com nome, código, cor e descrição. **Excluir** retira o tipo da lista de marcação e preserva as marcações existentes. Para reativá-lo, abra **Removidos → Restaurar**. O botão **×** nos grupos da bancada exclui só uma marcação específica.
+Não coloque 60 mil textos no código TypeScript: isso aumentaria o download inicial e enviaria o acervo inteiro a cada visitante. Aqui o navegador recebe apenas 20 comentários por página e antecipa quatro páginas seguintes e a anterior. O cache mantém no máximo 12 páginas por bancada, com validade de 30 segundos. As entidades aparecem imediatamente; as gravações são enviadas em sequência e confirmadas pelo servidor. Uma gravação recusada aparece como erro, nunca como sucesso.
 
-No celular, ao selecionar texto, os tipos aparecem na barra inferior. Deslize a lista para encontrar o tipo e toque nele para marcar. Use **Marcações** e **Detalhes do trecho** para abrir os painéis.
+As coordenadas são medidas em **pontos de código Unicode**: `start` inclusivo, `end` exclusivo. Não altere o texto do acervo, pois isso deslocaria as marcações. Cada entidade tem ID, start, end e label; relações ligam os IDs source e target. Exportações CSV/JSONL mantêm o ID original do comentário.
 
-O painel central exibe o ID original e permite saltar para qualquer comentário pelo ID. Os tokens de cor, tipografia, espaço e movimento ficam em `frontend/src/styles/tokens.css`.
+## Abrir no seu computador
 
-## PostgreSQL
-
-Instale as dependências do backend e ajuste o `backend/.env`:
-
-```dotenv
-YOUTUBENER_PG_DSN="host=127.0.0.1 port=5432 dbname=YoutubeNER user=seu_usuario password=SUA_SENHA"
-YOUTUBENER_PG_SCHEMA=dataset
-YOUTUBE_API_KEY=sua_chave_da_api_do_youtube
-```
-
-O arquivo `.env` é privado. Use a grafia exata do banco. A chave do YouTube é exigida apenas para novas coletas. Quando necessário, especifique `YOUTUBENER_PG_TABLE=comentario`, `YOUTUBENER_PG_ID=id` e `YOUTUBENER_PG_TEXT=texto` para a leitura.
-
-A sincronização lê IDs novos a cada 30 segundos por padrão (ajustável por `YOUTUBENER_PG_INTERVAL`), ou imediatamente com **Sincronizar agora**. A cópia local preserva o texto usado para os offsets: futuras edições ou exclusões no PostgreSQL não alteram esse texto. A posição na lista é só para navegação.
-
-Somente a ação **Adicionar ao PostgreSQL** grava no banco. Ela usa a tabela `dataset.comentario` com as colunas `id`, `autor`, `texto`, `likes` e `dia_hora`. O horário do YouTube é armazenado em UTC. Na primeira gravação, o backend cria `dataset.youtubener_origem` para relacionar o ID do comentário e do vídeo do YouTube ao ID original no PostgreSQL. A tabela de vínculo evita duplicatas ao repetir uma coleta. Registros históricos sem ID do YouTube são reaproveitados quando autor, texto e horário coincidem exatamente. A conta precisa de leitura e, para coletar no banco, de escrita, uso da sequência e permissão para criar a tabela de vínculo no schema na primeira vez.
-
-## Arquivos e exportação
-
-- **CSV do vídeo:** separado por ponto e vírgula, sem cabeçalho, com autor, texto, curtidas e data de publicação.
-- **CSV da coleção:** os comentários da coleção; para PostgreSQL, contém as colunas `id` e `texto`.
-- **JSONL de anotações:** um objeto por comentário marcado ou revisado. Inclui ID, texto, revisão, entidades e relações. `revisado: true` com `entidades: []` indica um exemplo negativo revisado.
-- **CSV de anotações:** uma linha por entidade, com ID original, ID do trecho, tipo, início, fim, texto do trecho e estado da revisão. As relações estão no JSONL.
-
-As anotações e o progresso são armazenados em `comentarios/colecoes/anotacoes.sqlite3`. Cada documento guarda coordenadas como `{"id":"…","start":42,"end":55,"label":"PERSON"}` e relações como `{"id":"…","source":"…","target":"…","label":"PERTENCE_A"}`. Os offsets contam pontos de código Unicode desde zero; o fim é exclusivo. Em Python, `texto[start:end]` recupera o trecho. Para fazer backup, pare o backend e copie a pasta `comentarios/colecoes/` inteira.
-
-## Executar
-
-Na raiz do projeto, usando o ambiente Python do projeto:
+Com Python 3.11+ e Node.js 22.12+ (ou 24 LTS) instalados, na pasta do projeto:
 
 ```powershell
-python -m pip install -r backend/requirements.txt
-python -m uvicorn backend.main:app --reload
+.\iniciar.ps1
 ```
 
-Em outro terminal:
+Abra **http://127.0.0.1:8000**. O script compila o React e inicia um único servidor local. O acervo `data` já está pronto nesta instalação. Este modo sem login se limita ao próprio computador; para disponibilizar na internet use o modo protegido abaixo.
+
+Para desenvolver a interface sem recompilar manualmente, use dois terminais:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+```
 
 ```powershell
 cd frontend
-npm.cmd install
-npm.cmd run dev
+npm ci
+npm run dev
 ```
 
-O Vite encaminha as chamadas de `/api` ao backend em `http://127.0.0.1:8000`. Para usar outra porta, defina `YOUTUBENER_API_URL` antes de iniciar o frontend. A API tem documentação em `/docs`.
+Abra http://localhost:5173. O Vite encaminha a API para o Python.
+
+## Preparação única de uma instalação antiga
+
+**Não execute novamente sobre uma pasta com anotações atuais.** Interrompa a anotação durante a migração e use uma pasta de destino nova. O comando usa backup consistente de SQLite (incluindo WAL), conserva os IDs, as versões e as anotações e nunca modifica a origem:
+
+```powershell
+.\.venv\Scripts\python.exe -m backend.preparar_acervo --origem comentarios/colecoes/anotacoes.sqlite3 --destino data
+```
+
+Se o programa falhar durante uma conversão, conserve a origem e escolha outra pasta de destino vazia. Faça a troca somente após conferir o manifesto. Não combine duas cópias que tenham recebido anotações separadamente.
+
+## Duas pessoas online
+
+As duas pessoas acessam **o mesmo servidor e o mesmo arquivo de anotações**. O arquivo permanece no disco local do servidor; não compartilhe SQLite por OneDrive, Google Drive, SMB ou NFS. Use uma única instância do aplicativo, sem múltiplas réplicas.
+
+O modo protegido mantém contas individuais, senhas com scrypt, sessões, papéis, fila com reserva de comentários, anotações independentes e histórico. Uma revisão usa a versão carregada: se alguém salvar antes, a segunda tentativa recebe conflito, sem sobrescrever silenciosamente.
+
+- **Anotador**: marca e envia para revisão; não altera o trabalho reservado a outra pessoa.
+- **Revisor**: revisa anotações enviadas, aprova ou pede ajustes.
+- **Administrador**: gerencia contas, entidades, revisão e backups.
+
+A conta inicial é criada pelo terminal do servidor. Depois, o administrador cria a segunda conta pela aba **Administração**. As tabelas necessárias são criadas automaticamente no arquivo; não é preciso criar tabelas manualmente.
+
+## Publicar em um único servidor (Docker + HTTPS)
+
+A opção preparada é uma **VPS Linux com disco persistente** ou uma máquina da universidade. A versão do Docker inclui o React compilado e o Python; Caddy fornece HTTPS. Não precisa de hospedagem de frontend separada.
+
+1. No servidor com Docker Compose, copie o código e a pasta **data** para uma pasta privada do aplicativo. Não coloque os arquivos de dados no GitHub público.
+2. Aponte um domínio/subdomínio ao IP do servidor e libere as portas 80/443. Não exponha a porta 8000 diretamente.
+3. Copie `deploy/.env.example` para `.env` na raiz e configure `APP_HOST=anotacao.seudominio.com`.
+4. Dê acesso ao usuário do contêiner à pasta de dados:
+
+```sh
+sudo chown -R 10001:10001 data
+chmod 700 data
+```
+
+5. Compile e crie a conta administrativa (a senha é solicitada sem aparecer no terminal):
+
+```sh
+docker compose build
+docker compose run --rm app python -m backend.security leandro admin
+docker compose up -d
+```
+
+6. Entre em `https://anotacao.seudominio.com`, abra Administração e cadastre a segunda pessoa.
+
+O modo de produção exige origem HTTPS e login. Na execução sem Docker, configure `YOUTUBENER_PRODUCTION=1`, `YOUTUBENER_WEB_ORIGIN=https://SEU_DOMINIO` e `YOUTUBENER_DATA_DIR=/caminho/absoluto/data`. Compile o frontend e inicie `uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1` atrás de um proxy HTTPS. Para teste protegido em localhost, use `YOUTUBENER_AUTH=1`, `YOUTUBENER_WEB_ORIGIN=http://localhost:5173` e mantenha `YOUTUBENER_PRODUCTION` desativado.
+
+**Onde hospedar:** uma VPS Linux da Locaweb (https://www.locaweb.com.br/servidor-vps/) ou outro provedor com armazenamento permanente. Para começar sem contratar, uma máquina da UFU já disponível é compatível com essa mesma instalação. O Render gratuito tem disco efêmero: não o use para guardar estas anotações; discos persistentes exigem serviço pago (https://render.com/docs/disks e https://render.com/docs/free). Cloudflare Pages sozinho hospeda arquivos estáticos, mas não executa este Python nem mantém o arquivo compartilhado de anotações. Nenhum serviço foi contratado ou publicado por esta alteração.
+
+## Backup e restauração
+
+O administrador pode baixar um snapshot consistente de `anotacoes.sqlite3` pela interface. O backup inclui contas e hashes de senha: mantenha privado. Sessões e limites de login ficam de fora. Guarde o `acervo.sqlite3` e o manifesto uma vez e gere backups regulares das anotações fora do servidor.
+
+Para restaurar, pare o aplicativo, guarde a pasta data atual como backup, coloque a cópia escolhida como `data/anotacoes.sqlite3` ao lado do mesmo acervo e só então reinicie. Não substitua um arquivo com o aplicativo aberto nem deixe os arquivos WAL/SHM de outra cópia ao lado dele. Confira o progresso após iniciar. A URL pública sozinha não é uma cópia de segurança.
+
+## Verificação
+
+```sh
+cd frontend
+npm run build
+npm run lint
+cd ..
+python -m pip install -r backend/requirements-dev.txt
+python -m unittest backend.test_acervo -v
+```
+
+Os testes usam cópias temporárias e cobrem login/permissões/origem, reserva entre dois anotadores, conflito simultâneo, revisão, conjuntos independentes, relações, exportações, backup, acervo imutável e IDs originais em páginas distantes. Não mudam o acervo de trabalho.

@@ -16,3 +16,6 @@
   .accessory { grid-row: 1; grid-column: 2; }
   .main, .wide { padding-top: var(--space-5); }
 }
+
+.logo { background:var(--reflection); color:var(--accent); box-shadow:inset 0 0 0 1px var(--line); }
+.header { box-shadow:inset 0 1px 0 white, 0 3px 18px #3c172505; }

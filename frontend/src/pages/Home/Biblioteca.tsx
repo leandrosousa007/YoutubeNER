@@ -1,133 +1,52 @@
-import { useState, type FormEvent } from 'react'
 import { Button } from '../../components/Button/Button'
 import { Icon } from '../../components/Icon/Icon'
-import { api, apiColecao, json, mensagem, requisicao, type Colecao, type Postgres, type Usuario } from '../../features/anotacao/api'
-import s from './Pesquisa.module.css'
+import { apiColecao, type Colecao, type Usuario } from '../../features/anotacao/api'
+import s from './Dashboard.module.css'
 
-type Props = {
-  colecoes: Colecao[]
-  postgres: Postgres | null
-  sincronizar: () => Promise<void>
-  atualizarColecoes: () => Promise<void>
-  abrir: (item: Colecao) => void
-  usuario: Usuario | null
-}
-type Coleta = { inseridos: number; ja_existiam: number; coletados: number; sincronizacao: Postgres }
+type Props = { colecoes: Colecao[]; abrir: (colecao: Colecao) => void; usuario: Usuario | null }
 const numero = (n: number) => n.toLocaleString('pt-BR')
 
-export function Biblioteca({ colecoes, postgres, sincronizar, atualizarColecoes, abrir, usuario }: Props) {
-  const [video, setVideo] = useState('')
-  const [operacao, setOperacao] = useState<'postgres' | 'csv' | 'sync' | null>(null)
-  const [erro, setErro] = useState('')
-  const [aviso, setAviso] = useState('')
-  const espelho = colecoes.find(item => item.id === postgres?.colecao)
-  const bancoDisponivel = postgres?.estado !== 'sem_configuracao'
-  const admin = !usuario || usuario.papel === 'admin'
-  const total = colecoes.reduce((soma, item) => soma + item.total, 0)
-  const revisados = colecoes.reduce((soma, item) => soma + item.revisados, 0)
-
-  async function atualizarBanco() {
-    setOperacao('sync')
-    setErro('')
-    setAviso('')
-    try { await sincronizar() }
-    catch (erro) { setErro(mensagem(erro)) }
-    finally { setOperacao(null) }
-  }
-
-  async function enviar(evento: FormEvent<HTMLFormElement>) {
-    evento.preventDefault()
-    if (operacao) return
-    const botao = (evento.nativeEvent as SubmitEvent).submitter
-    const acao = botao?.getAttribute('data-acao') === 'postgres' && admin ? 'postgres' : 'csv'
-    if (acao === 'postgres' && !bancoDisponivel) return
-    const videoId = video.trim()
-    setOperacao(acao)
-    setErro('')
-    setAviso('')
-    try {
-      const init = json('POST', { video_id: videoId })
-      if (acao === 'postgres') {
-        const dados = await api<Coleta>('/api/coleta/postgres', init)
-        setAviso('Novos no PostgreSQL: ' + numero(dados.inseridos) + ' · Já existentes: ' + numero(dados.ja_existiam) + '.'
-          + (dados.sincronizacao.estado === 'erro' ? ' A gravação foi concluída. Use Sincronizar agora para atualizar a biblioteca.' : ''))
-        try { await atualizarColecoes() }
-        catch { setErro('A gravação foi concluída. Atualize a página para ver a coleção.') }
-      } else {
-        const resposta = await requisicao('/api/coleta/csv', init)
-        const url = URL.createObjectURL(await resposta.blob())
-        const link = document.createElement('a')
-        link.href = url
-        link.download = 'comentarios-youtube.csv'
-        document.body.appendChild(link)
-        link.click()
-        link.remove()
-        window.setTimeout(() => URL.revokeObjectURL(url), 1000)
-        setAviso('CSV do vídeo baixado.')
-      }
-    } catch (erro) { setErro(mensagem(erro)) }
-    finally { setOperacao(null) }
-  }
-
-  return (
-    <>
-      <header className={s.pageHead}>
-        <div><p className={s.eyebrow}>Corpus de pesquisa</p><h1>Coleções</h1><p className={s.lead}>Colete, organize e anote comentários do YouTube.</p></div>
-        {espelho && <Button onClick={() => abrir(espelho)}><Icon name="annotate" width="17" height="17" />Anotar comentários do banco</Button>}
-      </header>
-      <dl className={s.metrics}>
-        <div><dt>Comentários</dt><dd>{numero(total)}</dd></div>
-        <div><dt>Revisados</dt><dd>{numero(revisados)}</dd></div>
-        <div><dt>Pendentes</dt><dd>{numero(total - revisados)}</dd></div>
-      </dl>
-      <div className={s.grid}>
-        <section className={s.card} aria-labelledby="postgres-titulo">
-          <div className={s.cardHeader}><span className={s.cardIcon}><Icon name="database" /></span><div><p className={s.eyebrow}>Banco de dados</p><h2 id="postgres-titulo">PostgreSQL</h2></div></div>
-          <p>{postgres?.origem ? <><code>{postgres.origem}</code> · Sincronização automática</> : 'Os comentários do banco aparecem como uma coleção.'}</p>
-          {postgres?.mensagem && <p className={postgres.estado === 'erro' ? s.alert : s.muted}>{postgres.mensagem}</p>}
-          {postgres?.ultima_sync && <p className={s.muted}>Última leitura: {new Date(postgres.ultima_sync).toLocaleString('pt-BR')}</p>}
-          <div className={s.actions}>
-            {admin && <Button variant="secondary" disabled={!!operacao || !bancoDisponivel || postgres?.estado === 'sincronizando'}
-              onClick={() => void atualizarBanco()}><Icon name="refresh" width="16" height="16" />{operacao === 'sync' || postgres?.estado === 'sincronizando' ? 'Sincronizando…' : 'Sincronizar agora'}</Button>}
-          </div>
-        </section>
-        <form className={s.card} onSubmit={evento => void enviar(evento)}>
-          <div className={s.cardHeader}><span className={s.cardIcon}><Icon name="play" /></span><div><p className={s.eyebrow}>Nova coleta</p><h2>Comentários do YouTube</h2></div></div>
-          <p>Informe o ID ou o link do vídeo.</p>
-          <label htmlFor="video-id">ID ou link do vídeo</label>
-          <input id="video-id" placeholder="Ex.: 8MK8fBxAHoU" required maxLength={512}
-            value={video} disabled={!!operacao} onChange={evento => setVideo(evento.target.value)} />
-          <div className={s.actions}>
-            {admin && <Button type="submit" data-acao="postgres" disabled={!!operacao || !bancoDisponivel}>
-              {operacao === 'postgres' ? 'Coletando…' : 'Adicionar ao PostgreSQL'}
-            </Button>}
-            <Button variant="secondary" type="submit" data-acao="csv" disabled={!!operacao}>
-              <Icon name="download" width="16" height="16" />{operacao === 'csv' ? 'Preparando…' : 'Baixar CSV do vídeo'}
-            </Button>
-          </div>
-        </form>
+export function Biblioteca({ colecoes, abrir, usuario }: Props) {
+  const total = colecoes.reduce((soma, c) => soma + c.total, 0)
+  const revisados = colecoes.reduce((soma, c) => soma + c.revisados, 0)
+  const percentual = total ? revisados / total * 100 : 0
+  const principal = colecoes.find(c => c.revisados < c.total) ?? colecoes[0]
+  return <div className={s.dashboard}>
+    <section className={s.hero} aria-labelledby="inicio-titulo">
+      <div className={s.introduction}>
+        <h1 id="inicio-titulo">Estúdio de<br />anotação</h1>
+        <p className={s.description}>Selecione um trecho, marque a entidade e avance para o próximo comentário.</p>
+        <div className={s.heroActions}>
+          <Button disabled={!principal} onClick={() => principal && abrir(principal)}>Continuar anotação <Icon name="right" width="18" height="18" /></Button>
+          <a href="#acervo">Explorar acervo <span aria-hidden="true">↓</span></a>
+        </div>
+        <p className={s.microcopy}><Icon name="check" width="15" height="15" />Marcações salvas automaticamente</p>
       </div>
-      {(operacao === 'postgres' || operacao === 'csv') && <p className={s.notice} role="status">Buscando as páginas de comentários no YouTube…</p>}
-      {aviso && <p className={s.notice} role="status">{aviso}</p>}
-      {erro && <p className={s.alert} role="alert">{erro}</p>}
-      <section className={s.library} aria-labelledby="biblioteca">
-        <h2 id="biblioteca">Coleções salvas</h2>
-        {colecoes.length === 0 ? <p className={s.empty}>Sincronize o PostgreSQL para começar.</p> : (
-          <ul className={s.list}>{colecoes.map(item => (
-            <li key={item.id} className={s.listItem}>
-              <div className={s.itemText}>
-                <strong>{item.nome}</strong>
-                <span>{numero(item.revisados)} de {numero(item.total)} revisados · {item.origem === 'postgres' ? 'PostgreSQL' : 'Arquivo local'}</span>
-                <progress value={item.revisados} max={item.total || 1} aria-label={'Progresso de ' + item.nome} />
-              </div>
-              <div className={s.actions}>
-                {usuario?.papel !== 'anotador' && <a href={apiColecao(item.id) + '/csv'}><Icon name="download" width="16" height="16" />Baixar CSV da coleção</a>}
-                <Button variant="secondary" onClick={() => abrir(item)}>Anotar</Button>
-              </div>
-            </li>
-          ))}</ul>
-        )}
-      </section>
-    </>
-  )
+      <div className={s.preview} aria-label="Exemplo ilustrativo de anotação">
+        <div className={s.previewTop}><span className={s.previewIcon}><Icon name="annotate" /></span><span>Bancada de anotação<small>Prévia do comentário</small></span><span className={s.saved}>Salvo <Icon name="check" width="13" height="13" /></span></div>
+        <div className={s.previewText}><span className={s.exampleLabel}>EXEMPLO DE ANOTAÇÃO</span><p><mark data-label="PERSON">Ana</mark> começou a fazer<br /><mark data-label="EXERCISE">caminhada</mark> por <mark data-label="DURATION">30 minutos</mark>.</p></div>
+        <div className={s.previewBottom}><span><span />3 entidades identificadas</span></div>
+      </div>
+    </section>
+    <section className={s.overview} aria-label="Progresso do projeto">
+      <div className={s.overviewTitle}><span className={s.sectionIcon}><Icon name="list" /></span><div><h2>Progresso da revisão</h2></div></div>
+      <dl className={s.stats}>
+        <div><dt>Comentários no acervo</dt><dd>{numero(total)}</dd></div>
+        <div><dt>Revisados</dt><dd>{numero(revisados)}<small> / {numero(total)}</small></dd></div>
+        <div><dt>Progresso geral</dt><dd>{percentual.toLocaleString('pt-BR', { maximumFractionDigits: 1 })}<small>%</small></dd></div>
+      </dl>
+      <progress className={s.totalProgress} value={revisados} max={total || 1} aria-label="Progresso geral de revisão" />
+    </section>
+    <section id="acervo" className={s.corpus} aria-labelledby="acervo-titulo">
+      <header className={s.sectionHead}><div><h2 id="acervo-titulo">Seu acervo</h2></div><span>{colecoes.length} {colecoes.length === 1 ? 'coleção' : 'coleções'} · Textos originais preservados</span></header>
+      {!colecoes.length ? <p className={s.empty}>O acervo ainda não foi preparado. Consulte as instruções de instalação do projeto.</p> : <ul className={s.collections}>{colecoes.map(c => <li key={c.id}>
+        <div className={s.collectionTop}><span className={s.folder}><Icon name="folder" width="25" height="25" /></span><span className={s.collectionBadge}>ACERVO FIXO</span></div>
+        <h3>{c.nome.replace(/PostgreSQL/gi, 'Comentários')}</h3><p>{numero(c.total)} comentários para explorar</p>
+        <div className={s.collectionProgress}><span>{numero(c.revisados)} revisados</span><strong>{(c.total ? c.revisados / c.total * 100 : 0).toLocaleString('pt-BR', { maximumFractionDigits: 1 })}%</strong></div>
+        <progress value={c.revisados} max={c.total || 1} aria-label={'Revisão de ' + c.nome} />
+        <div className={s.collectionActions}><Button variant="secondary" onClick={() => abrir(c)}>Abrir bancada <Icon name="right" width="16" height="16" /></Button>{usuario?.papel !== 'anotador' && <a href={apiColecao(c.id) + '/csv'} aria-label={'Baixar comentários de ' + c.nome}><Icon name="download" width="17" height="17" /> CSV</a>}</div>
+      </li>)}</ul>}
+    </section>
+
+  </div>
 }

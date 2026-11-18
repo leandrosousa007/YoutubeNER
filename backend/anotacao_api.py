@@ -1,23 +1,16 @@
 import csv
 import io
 import json
-from datetime import date
 from typing import Annotated
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Path, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from .security import usuario
-from .pg_storage import enabled
+from .config import enabled
 
-if __package__:
-    from .corpus import PASTA, banco
-    from .postgres_sync import status_postgres, sincronizar_postgres
-else:
-    from corpus import PASTA, banco
-    from recomendacoes import modelo_local, sugerir
-    from postgres_sync import status_postgres, sincronizar_postgres
+from .corpus import banco
 
 
 router = APIRouter(prefix="/api")
@@ -61,7 +54,7 @@ def decodificar(valor, padrao):
 
 
 def obter_colecao(db, colecao):
-    item = db.execute("""SELECT c.*, (SELECT COUNT(*) FROM comentarios
+    item = db.execute("""SELECT c.*, (SELECT COUNT(*) FROM anotacoes
                       WHERE colecao = c.id AND revisado = 1) AS revisados
                       FROM colecoes c WHERE c.id = ?""", (colecao,)).fetchone()
     if item is None:
@@ -72,31 +65,17 @@ def obter_colecao(db, colecao):
 @router.get("/colecoes")
 def listar_colecoes():
     with banco() as db:
-        return [dict(r) for r in db.execute("""SELECT c.*, (SELECT COUNT(*) FROM comentarios
+        return [dict(r) for r in db.execute("""SELECT c.*, (SELECT COUNT(*) FROM anotacoes
                 WHERE colecao = c.id AND revisado = 1) AS revisados
                 FROM colecoes c ORDER BY c.criado_em DESC, c.rowid DESC""")]
-
-
-@router.get("/postgres")
-def consultar_postgres():
-    return status_postgres()
-
-
-@router.post("/postgres/sincronizar")
-def buscar_postgres():
-    return sincronizar_postgres()
 
 
 @router.get("/colecoes/{colecao}/csv")
 def baixar_csv(colecao: ColecaoId):
     with banco() as db:
-        item = obter_colecao(db, colecao)
-    if item["origem"] == "postgres":
-        return resposta_csv(
-            colecao, "comentarios.csv", ("id", "texto"),
-            "SELECT id_origem, texto FROM comentarios WHERE colecao = ? ORDER BY pos",
-        )
-    return FileResponse(PASTA / colecao / "comentarios.csv", filename="comentarios.csv", media_type="text/csv")
+        obter_colecao(db, colecao)
+    return resposta_csv(colecao, "comentarios.csv", ("id", "texto"),
+        "SELECT COALESCE(id_origem,CAST(pos AS TEXT)),texto FROM comentarios WHERE colecao=? ORDER BY pos")
 
 
 @router.get("/colecoes/{colecao}/pendente")
@@ -123,17 +102,25 @@ def proximo(colecao, depois, revisao):
                 item = db.execute("""SELECT pos FROM tarefas WHERE colecao=? AND estado='enviado'
                     ORDER BY (pos <= ?), pos LIMIT 1""", (colecao,depois)).fetchone()
                 return {"pos": item["pos"] if item else None}
-            item = db.execute("""SELECT c.pos FROM comentarios c LEFT JOIN tarefas t USING(colecao,pos)
-                WHERE c.colecao=? AND c.revisado=0 AND
+            consulta = """SELECT c.pos FROM comentarios c LEFT JOIN tarefas t USING(colecao,pos)
+                WHERE c.colecao=? AND c.pos>? AND c.revisado=0 AND
                 (t.pos IS NULL OR (t.estado IN ('rascunho','ajuste') AND t.autor=?) OR
-                 (t.estado='rascunho' AND c.versao=0 AND t.expira<now()))
-                ORDER BY CASE WHEN ?=0 AND t.autor=? THEN 0 ELSE 1 END, (c.pos <= ?), c.pos LIMIT 1""",
-                (colecao,pessoa["login"],depois,pessoa["login"],depois)).fetchone()
+                 (t.estado='rascunho' AND c.versao=0 AND t.expira<CURRENT_TIMESTAMP))
+                ORDER BY c.pos LIMIT 1"""
+            item = None
+            if not depois:
+                item = db.execute("""SELECT t.pos FROM tarefas t LEFT JOIN anotacoes a USING(colecao,pos)
+                    WHERE t.colecao=? AND t.autor=? AND t.estado IN ('rascunho','ajuste')
+                    AND COALESCE(a.revisado,0)=0 ORDER BY t.pos LIMIT 1""", (colecao,pessoa["login"])).fetchone()
+            if item is None:
+                item = db.execute(consulta,(colecao,depois,pessoa["login"])).fetchone()
+            if item is None and depois:
+                item = db.execute(consulta,(colecao,0,pessoa["login"])).fetchone()
             if item:
-                db.execute("""DELETE FROM tarefas t USING comentarios c WHERE t.colecao=c.colecao AND t.pos=c.pos
-                    AND t.colecao=? AND t.autor=? AND t.pos<>? AND t.estado='rascunho' AND c.versao=0""",
+                db.execute("""DELETE FROM tarefas WHERE colecao=? AND autor=? AND pos<>? AND estado='rascunho'
+                    AND NOT EXISTS(SELECT 1 FROM anotacoes a WHERE a.colecao=tarefas.colecao AND a.pos=tarefas.pos AND a.versao>0)""",
                     (colecao,pessoa["login"],item["pos"]))
-                db.execute("""INSERT INTO tarefas VALUES (?,?,?,'rascunho',now()+interval '30 minutes')
+                db.execute("""INSERT INTO tarefas VALUES (?,?,?,'rascunho',datetime('now','+30 minutes'))
                     ON CONFLICT(colecao,pos) DO UPDATE SET autor=excluded.autor,expira=excluded.expira""",
                     (colecao,item["pos"],pessoa["login"]))
             return {"pos": item["pos"] if item else None}
@@ -145,49 +132,64 @@ def proximo(colecao, depois, revisao):
         return {"pos": item["pos"] if item else None}
 
 
-def obter_comentario(db, colecao, pos):
-    comentario = db.execute("SELECT * FROM comentarios WHERE colecao = ? AND pos = ?", (colecao, pos)).fetchone()
-    if comentario is None:
-        raise HTTPException(404, "Comentário não encontrado.")
+def consultar_comentarios(db, colecao, inicio, tamanho):
+    colunas = "c.*"
+    tarefas = ""
+    if enabled():
+        colunas += """, t.autor, t.estado,
+            CASE WHEN t.estado = 'ajuste' THEN (
+                SELECT json_extract(h.anterior,'$.feedback') FROM historico h
+                WHERE h.colecao=c.colecao AND h.pos=c.pos
+                    AND h.acao='ajuste' AND h.conjunto IS NULL
+                ORDER BY h.id DESC LIMIT 1
+            ) END AS feedback"""
+        tarefas = "LEFT JOIN tarefas t USING (colecao,pos)"
+    return db.execute(f"""SELECT {colunas} FROM comentarios c {tarefas}
+        WHERE c.colecao = ? AND c.pos >= ? ORDER BY c.pos LIMIT ?""",
+        (colecao, inicio, tamanho))
+
+
+def serializar_comentario(comentario, *, resumo=False):
+    pos = comentario["pos"]
     documento = decodificar(comentario["anotacao_json"], {"spans": [], "relations": []})
     entidades = [{"id": e["id"], "inicio": e["start"], "fim": e["end"], "tipo": e["label"],
                   "texto": comentario["texto"][e["start"]:e["end"]]} for e in documento["spans"]]
     resultado = {"pos": pos, "id": comentario["id_origem"] or str(pos), "texto": comentario["texto"], "revisado": bool(comentario["revisado"]),
-            "versao": comentario["versao"], "entidades": entidades, "relacoes": documento["relations"],
-            "rejeitadas": decodificar(comentario["rejeitadas"], [])}
+            "versao": comentario["versao"], "entidades": entidades, "relacoes": documento["relations"]}
+    if not resumo:
+        resultado["rejeitadas"] = decodificar(comentario["rejeitadas"], [])
     if enabled():
-        tarefa = db.execute("SELECT autor,estado FROM tarefas WHERE colecao=? AND pos=?", (colecao,pos)).fetchone()
-        resultado.update(dict(tarefa) if tarefa else {"autor":None,"estado":"revisado" if resultado["revisado"] else "pendente"})
+        estado = comentario["estado"]
+        resultado.update(autor=comentario["autor"], estado=estado or ("revisado" if resultado["revisado"] else "pendente"))
         if resultado["estado"] == "ajuste":
-            nota = db.execute("""SELECT anterior->>'feedback' AS feedback FROM historico WHERE colecao=? AND pos=?
-                AND acao='ajuste' AND conjunto IS NULL ORDER BY id DESC LIMIT 1""", (colecao,pos)).fetchone()
-            resultado["feedback"] = nota["feedback"] if nota else None
+            resultado["feedback"] = comentario["feedback"]
     return resultado
+
+
+def obter_comentario(db, colecao, pos):
+    comentario = consultar_comentarios(db, colecao, pos, 1).fetchone()
+    if comentario is None or comentario["pos"] != pos:
+        raise HTTPException(404, "Comentário não encontrado.")
+    return serializar_comentario(comentario)
 
 
 @router.get("/colecoes/{colecao}/pagina")
 def carregar_pagina(colecao: ColecaoId, inicio: int = Query(1, ge=1), tamanho: int = Query(20, ge=1, le=50)):
     with banco() as db:
-        db.execute("BEGIN")
+        if not enabled():
+            db.execute("BEGIN")
         item = obter_colecao(db, colecao)
-        dados = []
-        for r in db.execute("SELECT pos FROM comentarios WHERE colecao = ? AND pos >= ? ORDER BY pos LIMIT ?",
-                            (colecao, inicio, tamanho)):
-            comentario = obter_comentario(db, colecao, r["pos"])
-            del comentario["rejeitadas"]
-            dados.append(comentario)
+        dados = [serializar_comentario(r) for r in consultar_comentarios(db, colecao, inicio, tamanho)]
         return {"colecao": item, "comentarios": dados}
 
 
 @router.get("/colecoes/{colecao}/por-id")
 def localizar_id(colecao: ColecaoId, id: str = Query(min_length=1, max_length=1024)):
     with banco() as db:
-        item = obter_colecao(db, colecao)
-        if item["origem"] == "postgres":
-            r = db.execute("SELECT pos FROM comentarios WHERE colecao = ? AND id_origem = ?", (colecao, id)).fetchone()
-        else:
-            pos = int(id) if id.isascii() and id.isdecimal() and len(id) <= 15 else 0
-            r = db.execute("SELECT pos FROM comentarios WHERE colecao = ? AND pos = ?", (colecao, pos)).fetchone()
+        obter_colecao(db, colecao)
+        r = db.execute("SELECT pos FROM acervo.textos WHERE colecao=? AND id_origem=?", (colecao,id)).fetchone()
+        if not r and id.isascii() and id.isdecimal() and len(id) <= 15:
+            r = db.execute("SELECT pos FROM acervo.textos WHERE colecao=? AND pos=? AND id_origem IS NULL", (colecao,int(id))).fetchone()
         if not r:
             raise HTTPException(404, "ID não encontrado nesta coleção.")
         return {"pos": r["pos"]}
@@ -195,12 +197,11 @@ def localizar_id(colecao: ColecaoId, id: str = Query(min_length=1, max_length=10
 
 @router.get("/colecoes/{colecao}/busca")
 def buscar(colecao: ColecaoId, texto: str = Query("", max_length=200), tipo: str = Query("", max_length=24),
-           autor: str = Query("", max_length=100), estado: str = Query("", max_length=20), depois: int = Query(0, ge=0),
-           video: str = Query("", max_length=11), de: date | None = None, ate: date | None = None):
+           autor: str = Query("", max_length=100), estado: str = Query("", max_length=20), depois: int = Query(0, ge=0)):
     condicoes = ["c.colecao=?", "c.pos>?"]
     params = [colecao, depois]
     if texto.strip():
-        condicoes.append("instr(lower(c.texto),lower(?))>0" if not enabled() else "strpos(lower(c.texto),lower(?))>0")
+        condicoes.append("instr(lower(c.texto),lower(?))>0")
         params.append(texto.strip())
     colaborativo = enabled()
     if not colaborativo and (autor or estado):
@@ -208,7 +209,7 @@ def buscar(colecao: ColecaoId, texto: str = Query("", max_length=200), tipo: str
     principal, independente, valores = [], [], []
     if tipo:
         principal.append("EXISTS (SELECT 1 FROM json_each(c.anotacao_json, '$.spans') e WHERE json_extract(e.value, '$.label')=?)")
-        independente.append("EXISTS (SELECT 1 FROM jsonb_array_elements(i.documento->'spans') e WHERE e.value->>'label'=?)")
+        independente.append("EXISTS (SELECT 1 FROM json_each(i.documento, '$.spans') e WHERE json_extract(e.value, '$.label')=?)")
         valores.append(tipo)
     if autor:
         principal.append("t.autor=?")
@@ -232,34 +233,9 @@ def buscar(colecao: ColecaoId, texto: str = Query("", max_length=200), tipo: str
     join = " LEFT JOIN tarefas t USING(colecao,pos)" if colaborativo else ""
     with banco() as db:
         obter_colecao(db, colecao)
-        aplicar_metadados(db, condicoes, params, video, de, ate)
         linhas = db.execute("SELECT c.pos,COALESCE(c.id_origem,CAST(c.pos AS TEXT)) AS id,c.texto FROM comentarios c"
                             + join + " WHERE " + " AND ".join(condicoes) + " ORDER BY c.pos LIMIT 21", params).fetchall()
     return {"itens":[dict(r) for r in linhas[:20]], "proximo":linhas[19]["pos"] if len(linhas)>20 else None}
-
-
-def aplicar_metadados(db, condicoes, params, video, de, ate):
-    if de and ate and de > ate:
-        raise HTTPException(422, "A data inicial deve ser anterior à final.")
-    if not (video or de or ate):
-        return
-    if not enabled():
-        raise HTTPException(422, "Os filtros de vídeo e data exigem PostgreSQL.")
-    if video:
-        if not db.execute("SELECT to_regclass('dataset.youtubener_origem') AS tabela").fetchone()["tabela"]:
-            condicoes.append("FALSE")
-        else:
-            condicoes.append("EXISTS (SELECT 1 FROM dataset.youtubener_origem v WHERE v.comentario_id::text=c.id_origem AND v.video_id=?)")
-            params.append(video)
-    if de or ate:
-        partes = ["m.id::text=c.id_origem"]
-        if de:
-            partes.append("m.dia_hora>=?")
-            params.append(de)
-        if ate:
-            partes.append("m.dia_hora<?::date+1")
-            params.append(ate)
-        condicoes.append("EXISTS (SELECT 1 FROM dataset.comentario m WHERE " + " AND ".join(partes) + ")")
 
 
 @router.get("/colecoes/{colecao}/comentarios/{pos}/historico")
@@ -268,7 +244,7 @@ def historico(colecao: ColecaoId, pos: int):
     if not pessoa or pessoa["papel"] == "anotador":
         raise HTTPException(403, "O histórico está disponível para revisores e administradores.")
     with banco() as db:
-        return [dict(r) for r in db.execute("""SELECT ator,acao,criado_em::text,conjunto,anterior FROM historico
+        return [{**dict(r), "anterior":decodificar(r["anterior"],{})} for r in db.execute("""SELECT ator,acao,criado_em,conjunto,anterior FROM historico
             WHERE colecao=? AND pos=? ORDER BY id DESC LIMIT 30""", (colecao,pos))]
 
 
@@ -287,7 +263,7 @@ def obter_conjunto(db, colecao, pos, conjunto):
                      (colecao,pos,conjunto)).fetchone()
     if not row and pessoa["login"] != conjunto:
         raise HTTPException(404, "Conjunto não encontrado.")
-    doc = row["documento"] if row else {}
+    doc = decodificar(row["documento"], {}) if row else {}
     estado = row["estado"] if row else "rascunho"
     return {**base, "autor":conjunto,"estado":estado,"versao":row["versao"] if row else 0,
         "revisado":estado=="revisado", "relacoes":doc.get("relations",[]), "rejeitadas":doc.get("rejeitadas",[]),
@@ -301,11 +277,12 @@ def listar_conjuntos(colecao: ColecaoId, pos: int):
     if not pessoa:
         raise HTTPException(403)
     with banco() as db:
-        obter_comentario(db,colecao,pos)
+        if not db.execute("SELECT 1 FROM acervo.textos WHERE colecao=? AND pos=?", (colecao, pos)).fetchone():
+            raise HTTPException(404, "Comentário não encontrado.")
         sql = "SELECT autor,estado,versao FROM conjuntos WHERE colecao=? AND pos=?"
         if pessoa["papel"] == "anotador":
-            return db.execute(sql+" AND autor=?", (colecao,pos,pessoa["login"])).fetchall()
-        return db.execute(sql+" ORDER BY autor", (colecao,pos)).fetchall()
+            return [dict(r) for r in db.execute(sql+" AND autor=?", (colecao,pos,pessoa["login"]))]
+        return [dict(r) for r in db.execute(sql+" ORDER BY autor", (colecao,pos))]
 
 
 @router.get("/colecoes/{colecao}/proximo-conjunto")
@@ -315,8 +292,54 @@ def proximo_conjunto(colecao: ColecaoId):
         raise HTTPException(403, "A fila está disponível para revisores e administradores.")
     with banco() as db:
         obter_colecao(db, colecao)
-        return db.execute("""SELECT pos,autor FROM conjuntos WHERE colecao=? AND estado='enviado'
+        r = db.execute("""SELECT pos,autor FROM conjuntos WHERE colecao=? AND estado='enviado'
                           ORDER BY pos,autor LIMIT 1""", (colecao,)).fetchone()
+        return dict(r) if r else None
+
+
+def montar_spans(db, revisao, atual):
+    tipos = {r["codigo"]: bool(r["ativo"]) for r in db.execute("SELECT codigo, ativo FROM tipos")}
+    texto = atual["texto"]
+    for item in revisao.entidades + revisao.rejeitadas:
+        if not item.inicio < item.fim <= len(texto) or not texto[item.inicio:item.fim].strip() or item.tipo not in tipos:
+            raise HTTPException(422, "A marcação contém um trecho ou tipo inválido.")
+    historicas = {(e["id"], e["inicio"], e["fim"], e["tipo"]) for e in atual["entidades"]}
+    if any(not tipos[e.tipo] and (e.id, e.inicio, e.fim, e.tipo) not in historicas for e in revisao.entidades):
+        raise HTTPException(422, "Esse tipo foi retirado do catálogo. Selecione um tipo ativo.")
+    ordenadas = sorted(revisao.entidades, key=lambda e: e.inicio)
+    if any(esq.fim > dir.inicio for esq, dir in zip(ordenadas, ordenadas[1:])):
+        raise HTTPException(422, "Escolha um trecho que não sobreponha outra marcação.")
+    anteriores = {(e["inicio"], e["fim"]): e["id"] for e in atual["entidades"]}
+    spans = []
+    ids_spans = set()
+    for e in ordenadas:
+        # IDs UUID gerados no navegador mantêm o rascunho estável durante o autosave.
+        # São locais a este comentário e continuam validados pelo modelo e por duplicidade.
+        id_span = e.id or anteriores.get((e.inicio, e.fim)) or uuid4().hex
+        if id_span in ids_spans:
+            raise HTTPException(422, "Dois trechos não podem usar o mesmo ID.")
+        ids_spans.add(id_span)
+        spans.append({"id": id_span, "start": e.inicio, "end": e.fim, "label": e.tipo})
+    return spans, ids_spans
+
+
+def montar_relacoes(revisao, atual, ids_spans):
+    relacoes = []
+    vistas = set()
+    ids_relacoes = set()
+    solicitadas = revisao.relacoes if revisao.relacoes is not None else [
+        Relacao(**r) for r in atual["relacoes"] if r["source"] in ids_spans and r["target"] in ids_spans]
+    for r in solicitadas:
+        chave = (r.source, r.target, r.label.strip())
+        if r.source not in ids_spans or r.target not in ids_spans or r.source == r.target:
+            raise HTTPException(422, "Uma relação precisa de dois trechos diferentes do mesmo comentário.")
+        if not chave[2] or chave in vistas or (r.id and r.id in ids_relacoes):
+            raise HTTPException(422, "A relação é inválida ou já existe.")
+        vistas.add(chave)
+        id_relacao = r.id or uuid4().hex
+        ids_relacoes.add(id_relacao)
+        relacoes.append({"id": id_relacao, "source": r.source, "target": r.target, "label": chave[2]})
+    return relacoes
 
 
 @router.put("/colecoes/{colecao}/comentarios/{pos}")
@@ -341,50 +364,13 @@ def salvar_revisao(colecao: ColecaoId, pos: int, revisao: Revisao, conjunto: str
             estado = "ajuste" if revisao.ajuste is not None else "revisado" if final else "enviado" if revisao.revisado else (
                 "enviado" if atual["estado"] == "enviado" else "ajuste" if atual["estado"] == "ajuste" else "rascunho")
             if not conjunto:
-                db.execute("""INSERT INTO tarefas VALUES (?,?,?,?,now()+interval '30 minutes')
+                db.execute("""INSERT INTO tarefas VALUES (?,?,?,?,datetime('now','+30 minutes'))
                 ON CONFLICT(colecao,pos) DO UPDATE SET estado=excluded.estado,expira=excluded.expira""",
                 (colecao,pos,autor,estado))
             db.execute("INSERT INTO historico (colecao,pos,ator,acao,anterior,conjunto) VALUES (?,?,?,?,?,?)",
                        (colecao,pos,pessoa["login"],estado,json.dumps({**atual,"feedback":revisao.ajuste},ensure_ascii=False),conjunto or None))
-        tipos = {r["codigo"]: bool(r["ativo"]) for r in db.execute("SELECT codigo, ativo FROM tipos")}
-        texto = atual["texto"]
-        for item in revisao.entidades + revisao.rejeitadas:
-            if not item.inicio < item.fim <= len(texto) or not texto[item.inicio:item.fim].strip() or item.tipo not in tipos:
-                raise HTTPException(422, "A marcação contém um trecho ou tipo inválido.")
-        historicas = {(e["id"], e["inicio"], e["fim"], e["tipo"]) for e in atual["entidades"]}
-        if any(not tipos[e.tipo] and (e.id, e.inicio, e.fim, e.tipo) not in historicas for e in revisao.entidades):
-            raise HTTPException(422, "Esse tipo foi retirado do catálogo. Selecione um tipo ativo.")
-        ordenadas = sorted(revisao.entidades, key=lambda e: e.inicio)
-        if any(esq.fim > dir.inicio for esq, dir in zip(ordenadas, ordenadas[1:])):
-            raise HTTPException(422, "Escolha um trecho que não sobreponha outra marcação.")
-        anteriores = {(e["inicio"], e["fim"]): e["id"] for e in atual["entidades"]}
-        ids_anteriores = set(anteriores.values())
-        spans = []
-        ids_spans = set()
-        for e in ordenadas:
-            if e.id and e.id not in ids_anteriores:
-                raise HTTPException(422, "O ID da marcação não pertence a este comentário.")
-            id_span = e.id or anteriores.get((e.inicio, e.fim)) or uuid4().hex
-            if id_span in ids_spans:
-                raise HTTPException(422, "Dois trechos não podem usar o mesmo ID.")
-            ids_spans.add(id_span)
-            spans.append({"id": id_span, "start": e.inicio, "end": e.fim, "label": e.tipo})
-        relacoes = []
-        vistas = set()
-        ids_relacoes = set()
-        solicitadas = revisao.relacoes if revisao.relacoes is not None else [
-            Relacao(**r) for r in atual["relacoes"] if r["source"] in ids_spans and r["target"] in ids_spans]
-        ids_anteriores_rel = {r["id"] for r in atual["relacoes"]}
-        for r in solicitadas:
-            chave = (r.source, r.target, r.label.strip())
-            if r.source not in ids_spans or r.target not in ids_spans or r.source == r.target:
-                raise HTTPException(422, "Uma relação precisa de dois trechos diferentes do mesmo comentário.")
-            if not chave[2] or chave in vistas or (r.id and (r.id not in ids_anteriores_rel or r.id in ids_relacoes)):
-                raise HTTPException(422, "A relação é inválida ou já existe.")
-            vistas.add(chave)
-            id_relacao = r.id or uuid4().hex
-            ids_relacoes.add(id_relacao)
-            relacoes.append({"id": id_relacao, "source": r.source, "target": r.target, "label": chave[2]})
+        spans, ids_spans = montar_spans(db, revisao, atual)
+        relacoes = montar_relacoes(revisao, atual, ids_spans)
         doc = json.dumps({"spans": spans, "relations": relacoes}, ensure_ascii=False, separators=(",", ":"))
         rejeitadas = [{"inicio": e.inicio, "fim": e.fim, "tipo": e.tipo} for e in revisao.rejeitadas]
         if conjunto:
@@ -427,7 +413,6 @@ def exportar(colecao: ColecaoId):
 @router.get("/colecoes/{colecao}/exportar")
 def exportar_filtrado(colecao: ColecaoId, formato: str = Query("jsonl", pattern="^(jsonl|csv)$"),
                       autor: str = Query("", max_length=100), estado: str = Query("", max_length=20),
-                      video: str = Query("", max_length=11), de: date | None = None, ate: date | None = None,
                       tipo: str = Query("", max_length=24), texto: str = Query("", max_length=200)):
     pessoa = usuario.get()
     if not pessoa or pessoa["papel"] == "anotador":
@@ -435,16 +420,15 @@ def exportar_filtrado(colecao: ColecaoId, formato: str = Query("jsonl", pattern=
     condicoes, params = ["c.colecao=?"], [colecao]
     with banco() as db:
         obter_colecao(db,colecao)
-        aplicar_metadados(db,condicoes,params,video,de,ate)
     for campo, valor in (("autor",autor.strip().lower()),("estado",estado)):
         if valor:
             condicoes.append("a."+campo+"=?")
             params.append(valor)
     if texto.strip():
-        condicoes.append("strpos(lower(c.texto),lower(?))>0")
+        condicoes.append("instr(lower(c.texto),lower(?))>0")
         params.append(texto.strip())
     if tipo:
-        condicoes.append("EXISTS (SELECT 1 FROM jsonb_array_elements(a.doc->'spans') e WHERE e.value->>'label'=?)")
+        condicoes.append("EXISTS (SELECT 1 FROM json_each(a.doc, '$.spans') e WHERE json_extract(e.value, '$.label')=?)")
         params.append(tipo)
     consulta = """WITH a AS (
        SELECT c.colecao,c.pos,t.autor,COALESCE(t.estado,CASE WHEN c.revisado=1 THEN 'revisado' ELSE 'rascunho' END) AS estado,
@@ -454,7 +438,7 @@ def exportar_filtrado(colecao: ColecaoId, formato: str = Query("jsonl", pattern=
        UNION ALL
        SELECT colecao,pos,autor,estado,versao,documento,'independente' FROM conjuntos WHERE colecao=?
     )
-    SELECT c.pos,COALESCE(c.id_origem,c.pos::text) AS id,c.texto,a.autor,a.estado,a.versao,a.doc,a.conjunto
+    SELECT c.pos,COALESCE(c.id_origem,CAST(c.pos AS TEXT)) AS id,c.texto,a.autor,a.estado,a.versao,a.doc,a.conjunto
     FROM a JOIN comentarios c USING(colecao,pos) WHERE """+" AND ".join(condicoes)+" ORDER BY c.pos,a.conjunto,a.autor"
 
     def linhas():
@@ -466,7 +450,7 @@ def exportar_filtrado(colecao: ColecaoId, formato: str = Query("jsonl", pattern=
         with banco() as db:
             for r in db.execute(consulta,(colecao,colecao,*params)):
                 item = dict(r)
-                doc = item.pop("doc") or {}
+                doc = decodificar(item.pop("doc"), {})
                 spans = doc.get("spans",[])
                 if formato == "jsonl":
                     yield json.dumps({**item,"colecao":colecao,"entidades":spans,"relacoes":doc.get("relations",[])}, ensure_ascii=False)+"\n"
@@ -519,7 +503,7 @@ def grupos_anotacoes(colecao: ColecaoId):
         obter_colecao(db, colecao)
         return [dict(r) for r in db.execute("""
             SELECT json_extract(e.value, '$.label') AS tipo, COUNT(*) AS total
-            FROM comentarios c, json_each(c.anotacao_json, '$.spans') e
+            FROM anotacoes c, json_each(c.anotacao_json, '$.spans') e
             WHERE c.colecao = ? AND c.anotado = 1 GROUP BY tipo
         """, (colecao,))]
 
@@ -533,9 +517,9 @@ def itens_anotacoes(colecao: ColecaoId, tipo: str = Query(min_length=1, max_leng
             SELECT c.pos, COALESCE(c.id_origem, CAST(c.pos AS TEXT)) AS comentario_id,
                    json_extract(e.value, '$.id') AS id, json_extract(e.value, '$.label') AS tipo,
                    json_extract(e.value, '$.start') AS inicio, json_extract(e.value, '$.end') AS fim,
-                   substr(c.texto, json_extract(e.value, '$.start')+1,
+                   substr(x.texto, json_extract(e.value, '$.start')+1,
                           json_extract(e.value, '$.end')-json_extract(e.value, '$.start')) AS texto
-            FROM comentarios c, json_each(c.anotacao_json, '$.spans') e
+            FROM anotacoes c JOIN acervo.textos x USING(colecao,pos), json_each(c.anotacao_json, '$.spans') e
             WHERE c.colecao = ? AND c.anotado = 1 AND json_extract(e.value, '$.label') = ?
             ORDER BY c.pos, inicio, id LIMIT ? OFFSET ?
         """, (colecao, tipo, tamanho, (pagina - 1) * tamanho))]

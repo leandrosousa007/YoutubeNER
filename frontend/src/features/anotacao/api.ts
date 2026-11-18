@@ -4,7 +4,7 @@ export type Colecao = {
   video_id: string | null
   total: number
   revisados: number
-  origem: 'arquivo' | 'postgres'
+  origem: 'acervo'
 }
 
 export type Marcacao = { id?: string; inicio: number; fim: number; tipo: string }
@@ -25,19 +25,10 @@ export type Comentario = {
   estado?: 'pendente' | 'rascunho' | 'enviado' | 'ajuste' | 'revisado'
   feedback?: string
 }
-export type ComentarioResumo = Omit<Comentario, 'rejeitadas'>
+export type ComentarioResumo = Comentario
 export type Pagina = { colecao: Colecao; comentarios: ComentarioResumo[] }
 export type Grupo = { tipo: string; total: number }
 export type ItemAnotacao = Entidade & { pos: number; comentario_id: string }
-export type Postgres = {
-  estado: 'sem_configuracao' | 'aguardando' | 'sincronizando' | 'ativo' | 'erro'
-  colecao: string | null
-  origem: string | null
-  ultima_sync: string | null
-  novos: number
-  mensagem: string
-}
-
 export type Tipo = { codigo: string; nome: string; cor: string; descricao: string }
 export type Catalogo = { tipos: Tipo[]; removidos: Tipo[] }
 export type Usuario = { login: string; papel: 'anotador' | 'revisor' | 'admin' }
@@ -52,7 +43,7 @@ export async function requisicao(url: string, init?: RequestInit): Promise<Respo
   if (!resposta.ok) {
     const dados = await resposta.json().catch(() => null)
     throw new Error(typeof dados?.detail === 'string' ? dados.detail :
-      Array.isArray(dados?.detail) ? 'Confira os campos e tente novamente.' : 'Não foi possível conectar ao servidor local.')
+      Array.isArray(dados?.detail) ? 'Confira os campos e tente novamente.' : 'Não foi possível conectar ao servidor.')
   }
   return resposta
 }

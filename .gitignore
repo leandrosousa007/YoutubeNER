@@ -11,3 +11,9 @@ DOCUMENTACAO_API.md
 DOCUMENTACAO_FRONTEND.md
 videos_selecionados.txt
 /comentarios/colecoes/
+/data/
+/backups/
+*.sqlite3-wal
+*.sqlite3-shm
+backend/.env
+
