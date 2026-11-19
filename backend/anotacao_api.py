@@ -377,18 +377,21 @@ def salvar_revisao(colecao: ColecaoId, pos: int, revisao: Revisao, conjunto: str
         if pessoa:
             anotador = pessoa["papel"] == "anotador"
             autor = atual["autor"] or pessoa["login"]
-            if anotador and (autor != pessoa["login"] or atual["estado"] in {"enviado","revisado"} or revisao.ajuste is not None):
-                raise HTTPException(403, "Este comentário está reservado ou já foi enviado para revisão.")
+            if anotador and atual["revisado"] and not conjunto:
+                # A primeira edição reabre a anotação principal e reserva o rascunho.
+                autor = pessoa["login"]
+            if anotador and (autor != pessoa["login"] or revisao.ajuste is not None):
+                raise HTTPException(403, "Este comentário está reservado a outra pessoa, ou a ação exige um revisor.")
             if pessoa["papel"] == "revisor" and autor != pessoa["login"] and atual["estado"] not in {"enviado","revisado"}:
                 raise HTTPException(403, "A anotação precisa ser enviada antes de ser revisada por outra pessoa.")
             if revisao.ajuste is not None and (not revisao.ajuste.strip() or atual["estado"] != "enviado"):
                 raise HTTPException(422, "Informe o ajuste em uma anotação enviada.")
-            final = revisao.revisado and not anotador and revisao.ajuste is None
-            estado = "ajuste" if revisao.ajuste is not None else "revisado" if final else "enviado" if revisao.revisado else (
+            final = revisao.revisado and revisao.ajuste is None
+            estado = "ajuste" if revisao.ajuste is not None else "revisado" if final else (
                 "enviado" if atual["estado"] == "enviado" else "ajuste" if atual["estado"] == "ajuste" else "rascunho")
             if not conjunto:
                 db.execute("""INSERT INTO tarefas VALUES (?,?,?,?,datetime('now','+30 minutes'))
-                ON CONFLICT(colecao,pos) DO UPDATE SET estado=excluded.estado,expira=excluded.expira""",
+                ON CONFLICT(colecao,pos) DO UPDATE SET autor=excluded.autor,estado=excluded.estado,expira=excluded.expira""",
                 (colecao,pos,autor,estado))
             db.execute("INSERT INTO historico (colecao,pos,ator,acao,anterior,conjunto) VALUES (?,?,?,?,?,?)",
                        (colecao,pos,pessoa["login"],estado,json.dumps({**atual,"feedback":revisao.ajuste},ensure_ascii=False),conjunto or None))

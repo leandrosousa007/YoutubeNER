@@ -421,7 +421,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
       setErro('Escolha um rótulo para o trecho selecionado ou limpe a seleção antes de confirmar.')
       return
     }
-    const aviso = item.revisado ? 'Comentário reaberto.' : usuario?.papel === 'anotador' ? 'Enviado para revisão.' : 'Revisão confirmada.'
+    const aviso = item.revisado ? 'Comentário reaberto.' : 'Revisão concluída.'
     void salvar({ revisado: !item.revisado, avancar: !item.revisado, aviso })
   }
 
@@ -462,7 +462,7 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   const grupos = <GruposAnotacao colecao={colecao.id} tipos={tipos} revisao={revisaoGrupos} selecionada={marca?.id} ocupado={navegacaoOcupada}
     localizar={localizarMarca} excluir={e => void excluir(e.pos, e.id)} embutido={compacto} />
   const rotuloRevisao = salvando ? 'Salvando…' : item?.revisado ? 'Reabrir revisão' :
-    usuario?.papel === 'anotador' ? (conjunto ? 'Enviar conjunto' : 'Enviar e avançar') : 'Concluir e avançar'
+    usuario?.papel === 'anotador' && conjunto ? 'Concluir conjunto' : 'Concluir e avançar'
   const falhou = falhaGravacao.current
   const acaoRevisao = falhou ? recarregar : confirmar
   const textoAcao = falhou ? 'Recarregar comentário' : rotuloRevisao
@@ -640,7 +640,7 @@ function motivoSomenteLeitura(item: Comentario | null, usuario: Usuario | null) 
   if (!item || !usuario || usuario.papel === 'admin') return ''
   const deOutro = !!item.autor && item.autor !== usuario.login
   const finalizado = item.estado === 'enviado' || item.revisado
-  if (usuario.papel === 'anotador' && finalizado) return 'Somente leitura. Este comentário já foi enviado para revisão.'
+  if (item.revisado) return ''
   if (deOutro && (usuario.papel === 'anotador' || !finalizado)) return 'Somente leitura. Comentário reservado a ' + item.autor + '.'
   return ''
 }

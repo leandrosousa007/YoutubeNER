@@ -54,7 +54,7 @@ As duas pessoas acessam **o mesmo servidor e o mesmo arquivo de anotações**. O
 
 O modo protegido mantém contas individuais, senhas com scrypt, sessões, papéis, fila com reserva de comentários, anotações independentes e histórico. Uma revisão usa a versão carregada: se alguém salvar antes, a segunda tentativa recebe conflito, sem sobrescrever silenciosamente.
 
-- **Anotador**: marca e envia para revisão; não altera o trabalho reservado a outra pessoa.
+- **Anotador**: marca, conclui a revisão e pode reabrir um comentário principal concluído. Rascunhos reservados a outra pessoa ficam protegidos.
 - **Revisor**: revisa anotações enviadas, aprova ou pede ajustes.
 - **Administrador**: gerencia contas, entidades, revisão e backups.
 

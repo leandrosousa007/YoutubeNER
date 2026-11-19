@@ -102,14 +102,23 @@ class AcervoTest(unittest.TestCase):
         body["entidades"]=[dict(id=uuid4().hex,inicio=0,fim=1,tipo="PERSON")]
         r=ana.put(f"{self.prefix}/comentarios/{a}",json=body)
         self.assertEqual(r.status_code,200,r.text)
-        self.assertEqual(r.json()["comentario"]["estado"],"enviado")
-        self.assertFalse(r.json()["comentario"]["revisado"])
-        reviewed=self.admin.put(f"{self.prefix}/comentarios/{a}",json=self.payload(r.json()["comentario"],True))
-        self.assertEqual(reviewed.status_code,200,reviewed.text)
-        self.assertTrue(reviewed.json()["comentario"]["revisado"])
+        self.assertEqual(r.json()["comentario"]["estado"],"revisado")
+        self.assertTrue(r.json()["comentario"]["revisado"])
+        # Uma revisão principal do administrador também pode ser corrigida.
+        pos = 43001
+        url = f"{self.prefix}/comentarios/{pos}"
+        aprovado = self.admin.put(url,json=self.payload(self.get_comment(pos),True)).json()["comentario"]
+        reaberto = ana.put(url,json=self.payload(aprovado))
+        self.assertEqual(reaberto.status_code,200,reaberto.text)
+        c = reaberto.json()["comentario"]
+        self.assertFalse(c["revisado"])
+        self.assertEqual(c["autor"],"testana")
+        self.assertEqual(bia.put(url,json=self.payload(c)).status_code,403)
+        self.assertTrue(ana.put(url,json=self.payload(c,True)).json()["comentario"]["revisado"])
         self.assertIsInstance(self.admin.get(f"{self.prefix}/comentarios/{a}/historico").json()[0]["anterior"],dict)
 
     def test_anotadores_simultaneos(self):
+        antes = self.admin.get(self.prefix+"/pagina").json()["colecao"]["revisados"]
         barreira = Barrier(2)
         def anotar(login):
             cliente = self.clients[login]
@@ -123,10 +132,15 @@ class AcervoTest(unittest.TestCase):
             barreira.wait(5)
             resposta = cliente.put(url, json=body)
             self.assertEqual(resposta.status_code, 200, resposta.text)
+            barreira.wait(5)
+            concluido = cliente.put(url,json=self.payload(resposta.json()["comentario"], True))
+            self.assertEqual(concluido.status_code, 200, concluido.text)
+            self.assertEqual(concluido.json()["comentario"]["estado"], "revisado")
             return pos, body["entidades"][0]["id"]
         with ThreadPoolExecutor(max_workers=2) as pool:
             a,b = pool.map(anotar, ["testana", "testbia"])
         self.assertNotEqual(a[0], b[0])
+        self.assertEqual(self.admin.get(self.prefix+"/pagina").json()["colecao"]["revisados"], antes + 2)
         for pos, span in (a,b):
             self.assertEqual(self.get_comment(pos)["entidades"][0]["id"], span)
         url = f"{self.prefix}/comentarios/42000"
