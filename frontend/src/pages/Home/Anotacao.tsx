@@ -101,17 +101,27 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
   const linhas = pagina && inicioCarregado === inicio ? pagina.comentarios : []
   const navegacaoOcupada = ocupado || salvando || falhaGravacao.current
   const faltam = total - (colecao?.revisados ?? 0)
+  const ativarLinha = useCallback((posicao: number) => {
+    if (posicao !== pos) {
+      setPos(posicao)
+      if (conjunto !== usuario?.login) setConjunto('')
+      setEventos(null)
+      setFeedback('')
+      setErro('')
+      setAviso('')
+    }
+  }, [pos, conjunto, usuario?.login])
+
   const capturar = useCallback((elemento: HTMLElement, posicao: number) => {
     if (falhaGravacao.current || (navegacaoOcupada && posicao !== pos)) return
     const selecao = lerTrecho(elemento)
     if (!selecao) return
-    setPos(posicao)
-    if (posicao !== pos && conjunto !== usuario?.login) setConjunto('')
+    ativarLinha(posicao)
     setMarca(null)
     setTrecho(atual => atual?.inicio === selecao.inicio && atual.fim === selecao.fim && atual.texto === selecao.texto ? atual : selecao)
     setErro('')
     setAviso('')
-  }, [pos, conjunto, usuario?.login, navegacaoOcupada])
+  }, [pos, ativarLinha, navegacaoOcupada])
 
   useEffect(() => {
     const media = window.matchMedia(MEDIA_COMPACTA)
@@ -417,10 +427,6 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
 
   function confirmar() {
     if (!item || navegacaoOcupada || !podeConfirmar) return
-    if (trecho && !marca) {
-      setErro('Escolha um rótulo para o trecho selecionado ou limpe a seleção antes de confirmar.')
-      return
-    }
     const aviso = item.revisado ? 'Comentário reaberto.' : 'Revisão concluída.'
     void salvar({ revisado: !item.revisado, avancar: !item.revisado, aviso })
   }
@@ -450,10 +456,16 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
     setPainel(null)
   }
 
+  function selecionarLinha(posicao: number) {
+    if (navegacaoOcupada) return
+    ativarLinha(posicao)
+    limparSelecao()
+  }
+
   function escolherMarca(e: Entidade, linha: ComentarioResumo) {
-    if (ocupado || (salvando && linha.pos !== pos) || !window.getSelection()?.isCollapsed) return
-    setPos(linha.pos)
-    setTrecho(null)
+    if (ocupado || falhaGravacao.current || (salvando && linha.pos !== pos)) return
+    ativarLinha(linha.pos)
+    limparSelecao()
     setMarca(e)
   }
 
@@ -588,12 +600,25 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
             </>}
           </div>}
           {total === 0 ? <p className={s.help}>Nenhum comentário com texto nesta coleção.</p> : linhas.length === 0 ? <p className={s.help} role="status">Abrindo comentários…</p> : (
-            <ol className={s.rows} start={inicio ?? 1}>
+            <ol className={s.rows} start={inicio ?? 1} onPointerUp={e => {
+              const selecao = window.getSelection()
+              if (!selecao?.rangeCount || selecao.isCollapsed) return
+              const intervalo = selecao.getRangeAt(0)
+              const origem = intervalo.startContainer.parentElement?.closest('li')
+              if (origem && e.currentTarget.contains(origem) && !origem.contains(intervalo.endContainer)) limparSelecao()
+            }}>
               {linhas.map(linha => {
                 const atual = item?.pos === linha.pos ? item : linha
-                return <li key={linha.id} className={pos === linha.pos ? s.activeRow : undefined}>
+                return <li key={linha.id} className={pos === linha.pos ? s.activeRow : undefined}
+                  onClick={evento => {
+                    const alvo = evento.target as Element
+                    if (alvo.closest('button, mark')) return
+                    const texto = alvo.closest<HTMLElement>('[data-comentario-pos]')
+                    if (texto && lerTrecho(texto)) return
+                    selecionarLinha(linha.pos)
+                  }}>
                   <button className={s.rowNumber} type="button" aria-current={pos === linha.pos ? 'true' : undefined} disabled={navegacaoOcupada}
-                    title={linha.id} aria-label={'Selecionar comentário ' + linha.id} onClick={() => ir(linha.pos)}>
+                    title={linha.id} aria-label={'Selecionar comentário ' + linha.id} onClick={() => selecionarLinha(linha.pos)}>
                     {numero(linha.pos)}<span aria-label={atual.revisado ? 'Revisado' : 'Pendente'}>{atual.revisado ? '✓' : '·'}</span>
                   </button>
                   <div className={s.rowContent}>
@@ -603,7 +628,19 @@ export function Anotacao({ colecoes, colecao, tipos, removidos, selecionar, atua
                     </span>
                     <p tabIndex={0} aria-label={'Texto do comentário ' + linha.id} data-comentario-pos={linha.pos}
                       onPointerUp={e => { if (!ocupado) capturar(e.currentTarget, linha.pos) }}
-                      onKeyUp={e => { if (!ocupado) capturar(e.currentTarget, linha.pos) }}>
+                      onKeyDown={e => {
+                        if (e.target !== e.currentTarget || e.ctrlKey || e.metaKey) return
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          selecionarLinha(linha.pos)
+                        } else if (e.key === 'Escape') limparSelecao()
+                      }}
+                      onKeyUp={e => {
+                        if (ocupado || e.target !== e.currentTarget) return
+                        if (e.shiftKey) capturar(e.currentTarget, linha.pos)
+                        if (trecho && linha.pos === pos && /^(Arrow(Left|Right|Up|Down)|Home|End)$/.test(e.key)
+                            && (!e.shiftKey || window.getSelection()?.isCollapsed)) limparSelecao()
+                      }}>
                       <TextoMarcado texto={linha.texto} entidades={conjunto && item?.pos !== linha.pos ? [] : atual.entidades} porCodigo={porCodigo}
                         escolher={e => escolherMarca(e, linha)} selecionada={pos === linha.pos ? marca : null} />
                     </p>
@@ -658,8 +695,16 @@ function TextoMarcado({ texto, entidades, porCodigo, escolher, selecionada }: Te
       {caracteres.slice(entidades[i - 1]?.fim ?? 0, e.inicio).join('')}
         <mark id={'span-' + e.id} role="button" tabIndex={0} aria-label={e.tipo + ': ' + e.texto} data-tipo={e.tipo}
           data-ativa={selecionada && chaveMarcacao(selecionada) === chaveMarcacao(e) ? '' : undefined}
-          style={{ '--tag': porCodigo.get(e.tipo)?.cor ?? '#537270' } as CSSProperties} onClick={() => escolher(e)}
-          onKeyDown={evento => { if (evento.key === 'Enter' || evento.key === ' ') { evento.preventDefault(); escolher(e) } }}>{e.texto}</mark>
+          style={{ '--tag': porCodigo.get(e.tipo)?.cor ?? '#537270' } as CSSProperties} onClick={evento => {
+            const texto = evento.currentTarget.closest<HTMLElement>('[data-comentario-pos]')
+            if (!texto || !lerTrecho(texto)) escolher(e)
+          }}
+          onKeyDown={evento => {
+            if (!evento.ctrlKey && !evento.metaKey && (evento.key === 'Enter' || evento.key === ' ')) {
+              evento.preventDefault()
+              escolher(e)
+            }
+          }}>{e.texto}</mark>
     </span>)}
     {caracteres.slice(entidades.at(-1)?.fim ?? 0).join('')}
   </>
